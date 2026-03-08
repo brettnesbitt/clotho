@@ -1,0 +1,17 @@
+spin_manifest_version = 2
+
+[application]
+name = "clotho-worker"
+version = "0.1.0"
+
+[[trigger.http]]
+route = "/..."
+component = "clotho-worker"
+
+[component.clotho-worker]
+source = "target/wasm32-wasip1/release/clotho_worker.wasm"
+# THIS IS THE PERMISSION STRIP
+allowed_outbound_hosts = ["udp://127.0.0.1:8125"] 
+
+[component.clotho-worker.build]
+command = "cargo build --target wasm32-wasip1 --release"

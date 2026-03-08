@@ -1,0 +1,3 @@
+Telemetry failed: operation not supported on this platform
+Telemetry failed: operation not supported on this platform
+Telemetry failed: operation not supported on this platform

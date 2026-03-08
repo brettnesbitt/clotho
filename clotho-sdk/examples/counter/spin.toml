@@ -1,0 +1,17 @@
+spin_manifest_version = 2
+
+[application]
+name = "counter-pipeline"
+version = "0.1.0"
+authors = ["Clotho Team"]
+description = "Example counter pipeline demonstrating Clotho SDK"
+
+[[trigger.http]]
+route = "/..."
+component = "counter"
+
+[component.counter]
+source = "target/wasm32-wasip1/release/counter.wasm"
+allowed_outbound_hosts = ["*://*:*"]
+[component.counter.build]
+command = "cargo build --target wasm32-wasip1 --release"

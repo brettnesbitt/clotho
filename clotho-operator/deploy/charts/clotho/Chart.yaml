@@ -1,0 +1,20 @@
+# deploy/charts/clotho/Chart.yaml
+apiVersion: v2
+name: clotho
+version: 0.1.0
+dependencies:
+  - name: cert-manager
+    version: "v1.14.0"
+    repository: "https://charts.jetstack.io"
+    condition: cert-manager.enabled # Let them disable if they already have it
+  - name: spin-operator
+    version: "0.2.0"
+    repository: "https://fermyon.github.io/spin-operator"
+  - name: traefik
+    version: "26.0.0"
+    repository: "https://traefik.github.io/charts"
+  - name: runtime-class-manager
+    version: "0.2.0" # Verify latest
+    repository: "https://github.com/spinframework/runtime-class-manager"
+
+#helm install kwasm-operator kwasm/kwasm-operator --namespace kwasm --create-namespace --set kwasmOperator.installerImage=ghcr.io/spinframework/containerd-shim-spin/node-installer:v0.23.0

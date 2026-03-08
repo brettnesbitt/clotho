@@ -1,0 +1,11 @@
+# CORRECT API GROUP
+apiVersion: core.spinkube.dev/v1alpha1
+kind: SpinAppExecutor
+metadata:
+  name: spin
+  namespace: default
+spec:
+  # The deployment strategy for the runtime
+  createDeployment: true
+#  deploymentConfig:
+#    replicas: 1

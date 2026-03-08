@@ -1,0 +1,12 @@
+apiVersion: core.clotho.run/v1alpha1
+kind: Pipeline
+metadata:
+  name: stock-analyzer-good
+spec:
+  gitRepository: "brett/stock-analyzer"
+  config:
+    - name: DB_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: production-db
+          key: password
