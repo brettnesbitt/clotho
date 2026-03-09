@@ -1,0 +1,17 @@
+apiVersion: core.clotho.run/v1alpha1
+kind: Pipeline
+metadata:
+  name: stock-analyzer-bad
+spec:
+  gitRepository: "brett/stock-analyzer"
+  reference: "main"
+  resources:
+    limits:
+      cpu: "500m"
+      memory: "128Mi"
+  config:
+    - name: DB_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: non-existent-secret  # <--- THIS SHOULD FAIL
+          key: password

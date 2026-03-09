@@ -1,0 +1,18 @@
+[package]
+name = "clotho-worker"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# The Spin SDK for Wasm components
+spin-sdk = "3.0" 
+# Fast serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# For making outbound calls (e.g. to a database)
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+# Error handling
+anyhow = "1.0"
