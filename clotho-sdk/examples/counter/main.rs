@@ -1,4 +1,4 @@
-use clotho_sdk::prelude::*;
+use clotho_sdk::Pipeline;
 use clotho_sdk::builtins::{VecSource, ConsoleSink};
 use anyhow::Result;
 
@@ -13,7 +13,7 @@ async fn main() -> Result<()> {
     let source = VecSource::new(items);
     
     // Build and run the pipeline
-    Pipeline::read(source)
+    Pipeline::stream(source)
         .map(|num| {
             // Double each number
             Ok(num * 2)

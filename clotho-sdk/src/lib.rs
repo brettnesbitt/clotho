@@ -5,6 +5,8 @@ pub mod traits;
 pub mod telemetry;
 pub mod stream;
 pub mod connectors;
+pub mod builtins;
+pub mod once;
 
 // Only compile Batch engine if requested
 #[cfg(feature = "batch")]
@@ -21,7 +23,10 @@ impl Pipeline {
     /// Create a Low-Latency, Item-by-Item pipeline.
     /// Best for: Webhooks, Alerts, IoT, API integration.
     pub fn stream<S, T>(source: S) -> stream::StreamPipeline<S, T> 
-    where S: Source<T> {
+    where 
+        S: Source<T> + 'static,
+        T: Send + Sync + 'static
+    {
         stream::StreamPipeline::new(source)
     }
 

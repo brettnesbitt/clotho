@@ -34,15 +34,15 @@ impl Default for StdoutSink {
 // Notice the trait bound: `T: Debug`. This is the magic key.
 impl<T> Sink<T> for StdoutSink 
 where 
-    T: Debug + Send + Sync 
+    T: Debug + Send + Sync + 'static
 {
     async fn write(&mut self, ctx: Context<T>) -> Result<()> {
         // Print the Trace ID/Record ID for observability
-        println!("{} Record ID: {}", self.prefix, ctx.id);
+        println!("{} Record ID: {}", self.prefix, ctx.span_id);
         
         // Print the Metadata if it exists (useful for checking Topic/Partition injection)
-        if !ctx.metadata.is_empty() {
-            println!("   Metadata: {:?}", ctx.metadata);
+        if !ctx.meta.is_empty() {
+            println!("   Metadata: {:?}", ctx.meta);
         }
 
         // Print the actual payload

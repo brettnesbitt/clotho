@@ -21,13 +21,16 @@ where
     }
 
     /// Synchronous Transform (CPU Bound - Math, Parsing, Filtering)
+    /// User provides a function over the data T, Context is preserved automatically.
     pub fn map<F>(mut self, op: F) -> Self 
-    where F: Fn(Context<T>) -> Result<Context<T>> + Send + Sync + 'static 
+    where F: Fn(T) -> Result<T> + Send + Sync + 'static 
     {
-        self.transforms.push(Box::new(move |ctx| {
-            let res = op(ctx);
-            // Wrap the sync result in an immediately resolving future
-            Box::pin(async move { res })
+        self.transforms.push(Box::new(move |ctx: Context<T>| {
+            let Context { data, span_id, parents, meta } = ctx;
+            let result = op(data);
+            Box::pin(async move {
+                result.map(|new_data| Context { data: new_data, span_id, parents, meta })
+            })
         }));
         self
     }
@@ -50,21 +53,20 @@ where
     {
         while let Some(ctx_result) = self.source.next().await {
             match ctx_result {
-                Ok(mut ctx) => {
-                    let mut dropped = false;
+                Ok(initial_ctx) => {
+                    let mut current = Some(initial_ctx);
                     // Execute the chain of async transformations
                     for op in &self.transforms {
-                        match op(ctx).await {
-                            Ok(new_ctx) => ctx = new_ctx,
+                        match op(current.take().unwrap()).await {
+                            Ok(new_ctx) => current = Some(new_ctx),
                             Err(e) => {
                                 // If a user returns an error, we drop the record (or send to DLQ)
                                 eprintln!("Dropped record: {}", e);
-                                dropped = true;
                                 break;
                             }
                         }
                     }
-                    if !dropped {
+                    if let Some(ctx) = current {
                         sink.write(ctx).await?;
                     }
                 }

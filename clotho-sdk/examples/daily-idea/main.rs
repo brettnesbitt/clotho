@@ -1,50 +1,29 @@
-use clotho_sdk::{Pipeline, Result};
-use clotho_sdk::connectors::http::HttpSource;
-use clotho_sdk::connectors::stdout::StdoutSink;
-use serde::Deserialize;
-
-#[derive(Debug, Deserialize, Clone)]
-struct DailyIdea {
-    symbol: String,
-    entry_price: f64,
-    stop_price: f64,
-    target_price: f64,
-    rationale: String,
-    timestamp: String,
-}
+use clotho_sdk::Pipeline;
+use clotho_sdk::builtins::{VecSource, ConsoleSink};
+use anyhow::Result;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     println!("🧵 Clotho Daily Idea Pipeline");
-    println!("   Fetching latest idea from Stockseer API");
+    println!("   Simulating daily idea fetch");
     println!();
 
-    // Fetch daily idea from Stockseer API every 60 seconds
-    let api_url = "https://stockseer.ai/api/idea-of-the-day";
-    let source = HttpSource::<DailyIdea>::new(api_url, 60);
+    // Mock daily ideas (in production, this would fetch from Stockseer API)
+    let ideas: Vec<String> = vec![
+        "AAPL: Entry $175.50, Stop $170.00, Target $185.00 - Strong momentum after earnings".into(),
+        "NVDA: Entry $880.00, Stop $850.00, Target $920.00 - AI demand continues".into(),
+        "TSLA: Entry $195.00, Stop $185.00, Target $210.00 - Production ramp accelerating".into(),
+    ];
+    
+    let source = VecSource::new(ideas);
     
     // Build and run the pipeline
     Pipeline::stream(source)
-        .map(|idea: DailyIdea| {
-            // Format the output
-            let output = format!(
-                "📊 Daily Idea: {}\n\
-                 💰 Entry: ${:.2}\n\
-                 🛑 Stop: ${:.2}\n\
-                 🎯 Target: ${:.2}\n\
-                 📝 Rationale: {}\n\
-                 ⏰ Generated: {}",
-                idea.symbol,
-                idea.entry_price,
-                idea.stop_price,
-                idea.target_price,
-                idea.rationale,
-                idea.timestamp
-            );
-            
-            Ok(output)
+        .map(|idea| {
+            println!("📊 {}", idea);
+            Ok(idea)
         })
-        .run(StdoutSink::new())
+        .run(ConsoleSink::new())
         .await?;
     
     println!();
