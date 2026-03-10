@@ -96,8 +96,49 @@ spec:
                   - name
                   type: object
                 type: array
+              gitCredentialsSecret:
+                description: |-
+                  GitCredentialsSecret is the name of a Secret containing git credentials.
+                  The secret should have a "token" key with a GitHub PAT or similar token.
+                type: string
               gitRepository:
-                description: 1. Source Control (The "Code")
+                description: |-
+                  1. Source Control (The "Code")
+                  If provided, the Clotho Builder will clone, compile, and push to the internal registry.
+                  If omitted and Image is provided, the builder is skipped entirely (Tier 2: BYOR).
+                type: string
+              image:
+                description: |-
+                  Image is the OCI image reference for the built pipeline.
+                  For Tier 1 (builder): populated automatically after build completes.
+                  For Tier 2 (BYOR): set by the user to skip the builder entirely.
+                type: string
+              imagePullSecrets:
+                description: |-
+                  ImagePullSecrets is a list of references to secrets for pulling from private registries.
+                  Only needed for Tier 2 (BYOR) when the image is in a private external registry (GCP, AWS, etc).
+                  These are passed through to the SpinApp so Kubernetes can authenticate the pull.
+                items:
+                  description: |-
+                    LocalObjectReference contains enough information to let you locate the
+                    referenced object inside the same namespace.
+                  properties:
+                    name:
+                      default: ""
+                      description: |-
+                        Name of the referent.
+                        This field is effectively required, but due to backwards compatibility is
+                        allowed to be empty. Instances of this type with an empty value here are
+                        almost certainly wrong.
+                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                      type: string
+                  type: object
+                  x-kubernetes-map-type: atomic
+                type: array
+              path:
+                description: |-
+                  Path is the subdirectory within the repository containing the pipeline code.
+                  Use this for monorepos where the Cargo.toml is not at the root.
                 type: string
               policy:
                 description: |-
@@ -195,8 +236,6 @@ spec:
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
                 type: object
-            required:
-            - gitRepository
             type: object
           status:
             description: PipelineStatus defines the observed state of Pipeline

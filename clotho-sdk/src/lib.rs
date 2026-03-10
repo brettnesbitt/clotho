@@ -1,64 +1,42 @@
+// clotho-sdk/src/lib.rs
+
 pub mod types;
 pub mod traits;
-pub mod pipeline;
 pub mod telemetry;
-pub mod dlq;
-pub mod builtins; // ConsoleSink, etc.
+pub mod stream;
+pub mod connectors;
 
-pub mod prelude {
-    pub use crate::pipeline::Pipeline;
-    pub use crate::traits::{Source, Sink};
-    pub use crate::types::Context;
-    pub use anyhow::{Result, anyhow};
-}
+// Only compile Batch engine if requested
+#[cfg(feature = "batch")]
+pub mod batch;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::builtins::*;
-    use crate::prelude::*;
+pub use traits::{Source, Sink};
+pub use types::Context;
+pub use anyhow::Result;
 
-    #[tokio::test]
-    async fn test_decoupled_pipeline() -> Result<()> {
-        // 1. Setup the "Topic"
-        let (mut topic_sink, topic_source) = memory_channel::<String>(10);
+/// The Global Builder
+pub struct Pipeline;
 
-        // 2. Pipeline A: The Producer (Ingest)
-        tokio::spawn(async move {
-            let inputs = vec!["transaction_1", "transaction_2"];
-            Pipeline::read(VecSource::new(inputs))
-                .map(|s| Ok(s.to_uppercase())) // "TRANSACTION_1"
-                .run(topic_sink)
-                .await
-                .unwrap();
-        });
+impl Pipeline {
+    /// Create a Low-Latency, Item-by-Item pipeline.
+    /// Best for: Webhooks, Alerts, IoT, API integration.
+    pub fn stream<S, T>(source: S) -> stream::StreamPipeline<S, T> 
+    where S: Source<T> {
+        stream::StreamPipeline::new(source)
+    }
 
-        // 3. Pipeline B: The Consumer (Processor)
-        // This reads what Pipeline A wrote, preserving the Trace ID!
-        let results = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let results_clone = results.clone();
+    /// Create a High-Throughput, Columnar pipeline (Polars).
+    /// Best for: ETL, Analytics, S3 Archiving, Database Sync.
+    #[cfg(feature = "batch")]
+    pub fn batch<S>(source: S) -> batch::BatchPipeline<S> 
+    where S: Source<polars::prelude::DataFrame> {
+        batch::BatchPipeline::new(source)
+    }
 
-        // We create a Custom Test Sink to capture output
-        struct CaptureSink { vec: std::sync::Arc<tokio::sync::Mutex<Vec<String>>> }
-        #[async_trait::async_trait]
-        impl Sink<String> for CaptureSink {
-            async fn write(&mut self, ctx: Context<String>) -> Result<()> {
-                self.vec.lock().await.push(ctx.data);
-                Ok(())
-            }
-        }
-
-        Pipeline::read(topic_source)
-            .map(|s| Ok(format!("Processed: {}", s)))
-            .run(CaptureSink { vec: results_clone })
-            .await?;
-
-        // 4. Verify
-        let final_data = results.lock().await;
-        assert_eq!(final_data[0], "Processed: TRANSACTION_1");
-        assert_eq!(final_data[1], "Processed: TRANSACTION_2");
-        
-        println!("✅ In-Memory Bus Test Passed");
-        Ok(())
+    /// Create a Single-Shot pipeline for Webhooks/Triggers.
+    /// Runs exactly once and returns.
+    pub fn once<T>(data: T) -> once::OncePipeline<T> 
+    where T: Send + Sync + 'static {
+        once::OncePipeline::new(data)
     }
 }

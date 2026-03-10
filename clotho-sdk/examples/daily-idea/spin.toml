@@ -1,0 +1,17 @@
+spin_manifest_version = 2
+
+[application]
+name = "daily-idea-pipeline"
+version = "0.1.0"
+authors = ["Clotho Team"]
+description = "Fetches Stockseer daily idea and outputs to stdout"
+
+[[trigger.http]]
+route = "/..."
+component = "daily-idea"
+
+[component.daily-idea]
+source = "target/wasm32-wasip1/release/daily-idea.wasm"
+allowed_outbound_hosts = ["https://stockseer.ai:443"]
+[component.daily-idea.build]
+command = "cargo build --target wasm32-wasip1 --release"

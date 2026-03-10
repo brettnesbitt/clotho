@@ -253,3 +253,38 @@ endef
 define gomodver
 $(shell go list -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' $(1) 2>/dev/null)
 endef
+
+
+### GLOBAL VERSIONING ###
+
+# Read the single source of truth
+VERSION := $(shell cat VERSION)
+
+# Docker Image Tags
+OPERATOR_IMG := ghcr.io/clotho/operator:$(VERSION)
+AGENT_IMG    := ghcr.io/clotho/agent:$(VERSION)
+BUILDER_IMG  := ghcr.io/clotho/builder:$(VERSION)
+
+.PHONY: version-check
+version-check:
+	@echo "Current Version: $(VERSION)"
+
+.PHONY: build-all
+build-all:
+	# 1. Build & Push Operator
+	docker build -t $(OPERATOR_IMG) ./clotho-operator
+	docker push $(OPERATOR_IMG)
+
+	# 2. Build & Push Agent
+	docker build -t $(AGENT_IMG) ./clotho-agent
+	docker push $(AGENT_IMG)
+	
+	# 3. Build & Push Builder
+	docker build -t $(BUILDER_IMG) ./build
+	docker push $(BUILDER_IMG)
+
+.PHONY: update-manifests
+update-manifests:
+	# Uses 'sed' to update the deployment YAMLs automatically
+	sed -i 's|image: ghcr.io/clotho/operator:.*|image: $(OPERATOR_IMG)|' deploy/operator.yaml
+	sed -i 's|image: ghcr.io/clotho/agent:.*|image: $(AGENT_IMG)|' deploy/operator.yaml

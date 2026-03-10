@@ -3,10 +3,12 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	// Clotho API
@@ -16,6 +18,7 @@ import (
 	spinva1 "github.com/spinkube/spin-operator/api/v1alpha1"
 
 	// K8s & Meta
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,11 +33,21 @@ type PipelineReconciler struct {
 
 // +kubebuilder:rbac:groups=core.clotho.run,resources=pipelines,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core.clotho.run,resources=pipelines/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=core.spinwasm.org,resources=spinapps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core.spinkube.dev,resources=spinapps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
 
 func (r *PipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
+
+	// TODO: Add sidecar injection for telemetry agent
+	// pass this in via an Environment Variable in the Operator Deployment
+	// operatorVersion := os.Getenv("OPERATOR_VERSION") // e.g. "0.0.1"
+	// sidecar := corev1.Container{
+	// 	Name:  "clotho-agent",
+	// 	Image: fmt.Sprintf("ghcr.io/clotho/agent:%s", operatorVersion),
+	// }
 
 	// 1. Fetch the Pipeline
 	var pipeline clothov1alpha1.Pipeline
@@ -42,7 +55,14 @@ func (r *PipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// 2. SAFETY CHECK: Validate Secrets Exist
+	// 2. Handle Build (Source -> Image)
+	// If this returns a Requeue or Error, stop here.
+	// We can't deploy a SpinApp until we have an Image.
+	if res, err := r.reconcileBuild(ctx, &pipeline); err != nil || res.Requeue {
+		return res, err
+	}
+
+	// 3. SAFETY CHECK: Validate Secrets Exist
 	// This prevents "CrashLoopBackOff" by catching configuration errors early.
 	if err := r.validateConfig(ctx, &pipeline); err != nil {
 		log.Error(err, "Configuration validation failed")
@@ -175,15 +195,12 @@ func (r *PipelineReconciler) constructSpinApp(p *clothov1alpha1.Pipeline) *spinv
 			Labels:    map[string]string{"managed-by": "clotho"},
 		},
 		Spec: spinva1.SpinAppSpec{
-			Image:    fmt.Sprintf("ghcr.io/%s:%s", p.Spec.GitRepository, p.Spec.Reference),
-			Executor: "spin",
-			Replicas: p.Spec.Replicas,
-
-			// CORRECT FIELD AND TYPE
-			Variables: vars,
-
-			// CORRECT TYPE
-			Resources: resources,
+			Image:            p.Spec.Image,
+			Executor:         "containerd-shim-spin", // Native Kubelet integration
+			Replicas:         p.Spec.Replicas,
+			ImagePullSecrets: p.Spec.ImagePullSecrets,
+			Variables:        vars,
+			Resources:        resources,
 		},
 	}
 }
@@ -193,5 +210,151 @@ func (r *PipelineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&clothov1alpha1.Pipeline{}).
 		Owns(&spinva1.SpinApp{}).
+		Owns(&batchv1.Job{}). // Watch builder jobs to detect completion
 		Complete(r)
+}
+
+// internalRegistry is the in-cluster OCI registry deployed as part of the Clotho control plane.
+// Builder jobs push here with --insecure. Kubelet pulls locally (fast, no auth, no egress).
+const internalRegistry = "clotho-registry.clotho-system.svc.cluster.local:5000"
+
+func (r *PipelineReconciler) reconcileBuild(ctx context.Context, pipeline *clothov1alpha1.Pipeline) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+
+	// -----------------------------------------------------------
+	// Tier 2: BYOR (Bring Your Own Registry)
+	// If the user set spec.image AND there is no gitRepository,
+	// skip the builder entirely. The image is already built.
+	// -----------------------------------------------------------
+	if pipeline.Spec.GitRepository == "" {
+		if pipeline.Spec.Image != "" {
+			log.Info("Tier 2: Using pre-built image, skipping builder", "image", pipeline.Spec.Image)
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// -----------------------------------------------------------
+	// Tier 1: Batteries Included (Internal Registry)
+	// Builder compiles from Git and pushes to the in-cluster registry.
+	// -----------------------------------------------------------
+	targetImage := fmt.Sprintf("%s/%s:%s", internalRegistry, pipeline.Name, pipeline.Spec.Reference)
+
+	// Skip if image is already set (build already completed)
+	if pipeline.Spec.Image == targetImage {
+		return ctrl.Result{}, nil
+	}
+
+	// Check if a Build Job is already running
+	jobName := fmt.Sprintf("builder-%s", pipeline.Name)
+	existingJob := &batchv1.Job{}
+	err := r.Get(ctx, types.NamespacedName{Name: jobName, Namespace: pipeline.Namespace}, existingJob)
+
+	if err == nil {
+		if existingJob.Status.Succeeded > 0 {
+			log.Info("Build job completed, updating image", "image", targetImage)
+			pipeline.Spec.Image = targetImage
+			return ctrl.Result{}, r.Update(ctx, pipeline)
+		}
+		if existingJob.Status.Failed > 0 {
+			log.Info("Build job failed", "job", jobName)
+			return ctrl.Result{}, nil
+		}
+		log.Info("Build job still running", "job", jobName)
+		return ctrl.Result{RequeueAfter: time.Second * 10}, nil
+	}
+
+	if !errors.IsNotFound(err) {
+		return ctrl.Result{}, err
+	}
+
+	// Create the Build Job
+	log.Info("Creating build job", "job", jobName, "targetImage", targetImage)
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName,
+			Namespace: pipeline.Namespace,
+		},
+		Spec: batchv1.JobSpec{
+			TTLSecondsAfterFinished: int32Ptr(600),
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyOnFailure,
+					Containers: []corev1.Container{{
+						Name:  "builder",
+						Image: "us-central1-docker.pkg.dev/quotopia-391900/clotho/clotho-builder:latest",
+						Args: []string{
+							pipeline.Spec.GitRepository,
+							pipeline.Spec.Reference,
+							targetImage,
+							pipeline.Spec.Path,
+						},
+						Env: r.buildEnvVars(pipeline),
+						VolumeMounts: []corev1.VolumeMount{
+							{
+								Name:      "cargo-cache",
+								MountPath: "/usr/local/cargo/registry",
+							},
+							{
+								Name:      "build-cache",
+								MountPath: "/app/target",
+							},
+						},
+					}},
+					Volumes: []corev1.Volume{
+						{
+							Name: "cargo-cache",
+							VolumeSource: corev1.VolumeSource{
+								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+									ClaimName: "clotho-builder-cache-pvc",
+								},
+							},
+						},
+						{
+							Name: "build-cache",
+							VolumeSource: corev1.VolumeSource{
+								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+									ClaimName: "clotho-project-cache-pvc",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if err := controllerutil.SetControllerReference(pipeline, job, r.Scheme); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	return ctrl.Result{}, r.Create(ctx, job)
+}
+
+func int32Ptr(i int32) *int32 { return &i }
+func boolPtr(b bool) *bool    { return &b }
+
+// buildEnvVars creates environment variables for the builder job.
+// Only git credentials are needed; registry auth is not required for the internal registry.
+func (r *PipelineReconciler) buildEnvVars(pipeline *clothov1alpha1.Pipeline) []corev1.EnvVar {
+	var envVars []corev1.EnvVar
+
+	gitSecretName := pipeline.Spec.GitCredentialsSecret
+	if gitSecretName == "" {
+		gitSecretName = "clotho-git-credentials"
+	}
+
+	envVars = append(envVars, corev1.EnvVar{
+		Name: "GIT_TOKEN",
+		ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: gitSecretName,
+				},
+				Key:      "token",
+				Optional: boolPtr(true),
+			},
+		},
+	})
+
+	return envVars
 }

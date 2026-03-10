@@ -1,84 +1,47 @@
-use serde::Serialize;
 use std::sync::OnceLock;
-use std::net::UdpSocket;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use serde::Serialize;
 
-static SOCKET: OnceLock<UdpSocket> = OnceLock::new();
+// 1. The Global Stopwatch
+// initialized the first time ANY code in the SDK is touched.
+static PROCESS_BIRTH: OnceLock<Instant> = OnceLock::new();
 
-#[derive(Serialize)]
-#[serde(tag = "type", content = "payload")]
-enum TelemetryEvent {
-    Lifecycle(LifecycleEvent),
-    Progress(ProgressEvent),
+/// Call this internally as early as possible
+pub fn mark_birth() {
+    PROCESS_BIRTH.get_or_init(|| Instant::now());
 }
 
-#[derive(Serialize)]
-struct LifecycleEvent {
-    pipeline_id: String,
-    event: String,
-    timestamp: u64,
-    uptime_ms: u64,
-    metadata: std::collections::HashMap<String, String>,
+/// Get milliseconds since the process started
+pub fn uptime_ms() -> u64 {
+    PROCESS_BIRTH.get()
+        .map(|t| t.elapsed().as_millis() as u64)
+        .unwrap_or(0) // Should only happen if mark_birth wasn't called
 }
 
-#[derive(Serialize)]
-struct ProgressEvent {
-    pipeline_id: String,
-    current: u64,
-    total: Option<u64>,
-    percent: Option<f64>,
-}
-
-pub fn init(pipeline_id: String) {
-    if SOCKET.get().is_some() { return; }
-
-    let socket = UdpSocket::bind("0.0.0.0:0").ok();
-    if let Some(sock) = socket {
-        let _ = sock.set_nonblocking(true);
-        let _ = SOCKET.set(sock);
-    }
-
-    emit(TelemetryEvent::Lifecycle(LifecycleEvent {
-        pipeline_id,
-        event: "START".to_string(),
+pub fn emit_data_quality(id: &str, rule: &str, status: ContractStatus, val: Option<String>) {
+    emit(TelemetryEvent::DataQuality(DataQualityEvent {
+        contract: ContractResult {
+            pipeline_id: id.to_string(),
+            rule_name: rule.to_string(),
+            status,
+            value: val,
+        },
         timestamp: now(),
-        uptime_ms: 0,
-        metadata: std::collections::HashMap::new(),
     }));
 }
 
-pub fn shutdown(pipeline_id: &str) {
-    emit(TelemetryEvent::Lifecycle(LifecycleEvent {
-        pipeline_id: pipeline_id.to_string(),
-        event: "STOP".to_string(),
-        timestamp: now(),
-        uptime_ms: 0,
-        metadata: std::collections::HashMap::new(),
-    }));
+#[derive(Serialize)]
+pub struct LifecycleEvent {
+    pub pipeline_id: String,
+    pub event: String,       // "STARTUP", "RUNNING", "STOPPED"
+    pub timestamp: u64,
+    
+    // --- New Cold Start Metrics ---
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub boot_latency_ms: Option<u64>, 
+    
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttfr_ms: Option<u64>,
 }
 
-pub fn report_progress(pipeline_id: &str, current: u64, total: Option<u64>) {
-    let percent = match total {
-        Some(t) if t > 0 => Some((current as f64 / t as f64) * 100.0),
-        _ => None,
-    };
-
-    emit(TelemetryEvent::Progress(ProgressEvent {
-        pipeline_id: pipeline_id.to_string(),
-        current,
-        total,
-        percent,
-    }));
-}
-
-fn emit(event: TelemetryEvent) {
-    if let Some(socket) = SOCKET.get() {
-        if let Ok(json) = serde_json::to_string(&event) {
-            let _ = socket.send_to(json.as_bytes(), "127.0.0.1:8125");
-        }
-    }
-}
-
-fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
-}
+// ... existing emit logic ...

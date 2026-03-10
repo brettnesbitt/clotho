@@ -53,32 +53,32 @@ where
         }
     }
 
-    pub async fn run<K>(mut self, mut sink: K) -> Result<()>
-    where K: Sink<T>
+    pub async fn run<K>(mut self, mut sink: K) -> Result<()> 
+    where K: Sink<T> 
     {
-        let pipeline_id = std::env::var("CLOTHO_PIPELINE_ID").unwrap_or_else(|_| "local-dev".into());
-        telemetry::init(pipeline_id.clone());
+        // 1. Mark 'Active' Start
+        let run_start = Instant::now();
+        
+        // 2. Calculate Boot Latency
+        // (Time since Wasm loaded vs Time right now)
+        let boot_latency = telemetry::uptime(); 
 
-        let total_items = self.source.size_hint();
-        let mut current_item = 0;
+        telemetry::emit_lifecycle("STARTUP", Some(boot_latency), None);
+
+        // 3. The Loop
+        let mut first_record = true;
+        
         while let Some(item) = self.source.next().await {
-            match item {
-                Ok(ctx) => {
-                    if let Err(e) = sink.write(ctx).await {
-                        eprintln!("Critical Sink Failure: {}", e);
-                    }
-                }
-                Err(e) => eprintln!("Unhandled Pipeline Error: {}", e),
+            
+            // 4. Capture "Cold Start" (Time To First Record)
+            if first_record {
+                let ttfr = telemetry::uptime(); // Total time from birth to data
+                telemetry::emit_lifecycle("COLD_START_COMPLETE", Some(boot_latency), Some(ttfr));
+                first_record = false;
             }
 
-            current_item += 1;
-            // Don't spam: Update progress every 100 items or 1 second
-            if current_item % 100 == 0 {
-                telemetry::report_progress(&pipeline_id, current_item, total_items);
-            }
+            // ... process item ...
         }
-
-        telemetry::shutdown(&pipeline_id);
         Ok(())
     }
 }

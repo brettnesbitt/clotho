@@ -1,0 +1,19 @@
+apiVersion: core.clotho.run/v1alpha1
+kind: Pipeline
+metadata:
+  name: counter-example
+  namespace: default
+spec:
+  gitRepository: "https://github.com/brettnesbitt/clotho"
+  reference: "main"
+  config:
+    - name: CLOTHO_PIPELINE_ID
+      value: "counter-example"
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "64Mi"
+    limits:
+      cpu: "500m"
+      memory: "128Mi"
+  replicas: 1

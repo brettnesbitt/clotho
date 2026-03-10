@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use anyhow::Result;
+use polars::prelude::DataFrame;
 use crate::types::Context;
 
 #[async_trait]
@@ -16,4 +17,11 @@ pub trait Source<T>: Send + Sync {
 pub trait Sink<T>: Send + Sync {
     /// Accepts a Context. Sinks are responsible for serializing the Trace headers.
     async fn write(&mut self, item: Context<T>) -> Result<()>;
+}
+
+#[async_trait]
+pub trait LookupTarget {
+    /// Takes a batch of keys, queries the underlying datastore, 
+    /// and returns a Polars DataFrame ready for joining.
+    async fn lookup_batch(&self, keys: Vec<&str>) -> Result<DataFrame>;
 }
