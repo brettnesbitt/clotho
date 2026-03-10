@@ -1,302 +1,231 @@
-use tokio::net::UdpSocket;
+mod kubelet;
+mod tracker;
+
 use std::sync::Arc;
 use std::collections::HashMap;
-use serde::{Deserialize, Serialize};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::net::SocketAddr;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
-use tokio::time::interval;
+use serde::{Deserialize, Serialize};
+use anyhow::Result;
 
-// --- Protocol Types (Matches SDK) ---
+// Reads the Agent's Cargo.toml version
+const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[derive(Deserialize, Debug, Clone)]
+// --- 1. Protocol Types (SDK -> Agent) ---
+#[derive(Deserialize, Serialize, Debug, Clone)] 
 #[serde(tag = "type", content = "payload")]
 enum TelemetryEvent {
     Lifecycle(LifecycleEvent),
     Progress(ProgressEvent),
-    Metric(MetricEvent),
+    DataQuality(DataQualityEvent),
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 struct LifecycleEvent {
     pipeline_id: String,
     event: String,
     timestamp: u64,
-    uptime_ms: u64,
-    metadata: HashMap<String, String>,
+    boot_latency_ms: Option<u64>,
+    ttfr_ms: Option<u64>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 struct ProgressEvent {
     pipeline_id: String,
     current: u64,
     total: Option<u64>,
-    percent: Option<f64>,
-    eta_seconds: Option<u64>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
-struct MetricEvent {
-    pipeline_id: String,
-    name: String,
-    value: f64,
+#[derive(Deserialize, Serialize, Debug, Clone)]
+struct DataQualityEvent {
+    contract: serde_json::Value,
+    timestamp: u64,
 }
 
-// --- API Payload Types (Matches Go API) ---
-
+// --- 2. API Payload Types (Agent -> Control Plane) ---
 #[derive(Serialize, Debug)]
 struct AgentPayload {
     pipeline_id: String,
     events: Vec<ApiEvent>,
-    stats: Option<ResourceStats>,
+    usage: Option<ResourceUsage>, // New FinOps Field
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 struct ApiEvent {
-    #[serde(rename = "type")]
     event_type: String,
-    timestamp: i64,
+    timestamp: u64,
     payload: serde_json::Value,
 }
 
-#[derive(Serialize, Debug)]
-struct ResourceStats {
-    cpu_nano: i64,
-    mem_bytes: i64,
+#[derive(Serialize, Debug, Clone)]
+struct ResourceUsage {
+    cpu_core_seconds: f64,
+    mem_gb_seconds: f64,
 }
 
-// --- State Management ---
-
-struct PipelineState {
-    events: Vec<ApiEvent>,
-    last_seen: Instant,
-    cpu_nano: i64,
-    mem_bytes: i64,
-}
-
+// --- 3. Shared State ---
 struct AgentState {
-    pipelines: HashMap<String, PipelineState>,
-    api_url: String,
+    // Buffer for events before flushing to API
+    // Map<PipelineID, Vec<Events>>
+    event_buffer: HashMap<String, Vec<ApiEvent>>,
+    
+    // The FinOps Calculator
+    tracker: tracker::ResourceTracker,
+    
     client: reqwest::Client,
+    api_url: String,
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Configuration
-    let api_url = std::env::var("CLOTHO_API_URL")
-        .unwrap_or_else(|_| "http://localhost:3000".to_string());
-    let udp_port = std::env::var("CLOTHO_AGENT_PORT")
-        .unwrap_or_else(|_| "8125".to_string());
-    let flush_interval_secs: u64 = std::env::var("CLOTHO_FLUSH_INTERVAL")
-        .and_then(|s| s.parse().map_err(|_| std::env::VarError::NotPresent))
-        .unwrap_or(5);
+async fn main() -> Result<()> {
+    // Config
+    let api_url = std::env::var("CLOTHO_API_URL").unwrap_or("http://localhost:3000/v1/telemetry".into());
+    let udp_port = std::env::var("CLOTHO_AGENT_PORT").unwrap_or("8125".into());
+    
+    println!("🧵 Clotho Agent v0.1");
+    println!("   Mode: Kubernetes DaemonSet");
+    println!("   Target: {}", api_url);
 
-    println!("🧵 Clotho Agent Starting...");
-    println!("   API URL: {}", api_url);
-    println!("   UDP Port: {}", udp_port);
-    println!("   Flush Interval: {}s", flush_interval_secs);
+    // Initialize Components
+    let socket = UdpSocket::bind(format!("0.0.0.0:{}", udp_port)).await?;
+    let kubelet = kubelet::KubeletClient::new().ok(); // Optional (might fail locally)
 
-    // Initialize state
+    if kubelet.is_none() {
+        println!("⚠️  Kubelet client failed to init. FinOps metrics disabled (Local Mode?)");
+    }
+
     let state = Arc::new(Mutex::new(AgentState {
-        pipelines: HashMap::new(),
-        api_url: format!("{}/v1/telemetry", api_url),
-        client: reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()?,
+        event_buffer: HashMap::new(),
+        tracker: tracker::ResourceTracker::new(),
+        client: reqwest::Client::new(),
+        api_url,
     }));
 
-    // Bind UDP socket
-    let socket = UdpSocket::bind(format!("0.0.0.0:{}", udp_port)).await?;
-    println!("📡 UDP Listener bound on port {}", udp_port);
-
-    let state_for_listener = state.clone();
-    let state_for_flush = state.clone();
-
-    // TASK 1: UDP Listener
-    let listener_handle = tokio::spawn(async move {
+    // --- TASK 1: UDP Listener (SDK Events) ---
+    let state_udp = state.clone();
+    tokio::spawn(async move {
         let mut buf = vec![0u8; 65535];
         loop {
-            match socket.recv_from(&mut buf).await {
-                Ok((len, _)) => {
-                    if let Ok(event) = serde_json::from_slice::<TelemetryEvent>(&buf[..len]) {
-                        handle_telemetry_event(state_for_listener.clone(), event).await;
-                    } else {
-                        // Try legacy format fallback
-                        if let Ok(legacy) = serde_json::from_slice::<serde_json::Value>(&buf[..len]) {
-                            println!("⚠️  Legacy format received: {:?}", legacy);
+            if let Ok((len, _)) = socket.recv_from(&mut buf).await {
+                if let Ok(event) = serde_json::from_slice::<TelemetryEvent>(&buf[..len]) {
+                    process_sdk_event(&state_udp, event).await;
+                }
+            }
+        }
+    });
+
+    // --- TASK 2: Kubelet Scraper (FinOps) ---
+    let state_scrape = state.clone();
+    tokio::spawn(async move {
+        if let Some(client) = kubelet {
+            let mut interval = tokio::time::interval(Duration::from_secs(15));
+            loop {
+                interval.tick().await;
+                if let Ok(summary) = client.get_stats().await {
+                    let mut locked = state_scrape.lock().await;
+                    
+                    for pod in summary.pods {
+                        // Only track Clotho pipelines
+                        if pod.podRef.name.contains("pipeline") { // Simple filter
+                            let cpu = pod.cpu.map(|c| c.usageNanoCores).unwrap_or(0);
+                            let mem = pod.memory.map(|m| m.workingSetBytes).unwrap_or(0);
+                            
+                            // Update the calculator
+                            // Note: We use pod.podRef.name as pipeline_id alias for now
+                            locked.tracker.update(&pod.podRef.name, cpu, mem);
                         }
                     }
                 }
-                Err(e) => {
-                    eprintln!("UDP receive error: {}", e);
-                }
             }
         }
     });
 
-    // TASK 2: Periodic Flush
-    let flush_handle = tokio::spawn(async move {
-        let mut ticker = interval(Duration::from_secs(flush_interval_secs));
-        loop {
-            ticker.tick().await;
-            if let Err(e) = flush_telemetry(state_for_flush.clone()).await {
-                eprintln!("❌ Flush error: {}", e);
-            }
-        }
-    });
-
-    // Wait for both tasks
-    tokio::select! {
-        _ = listener_handle => println!("Listener task exited"),
-        _ = flush_handle => println!("Flush task exited"),
+    // --- TASK 3: API Flush Loop ---
+    // Sends both Events and Billing Data to Control Plane
+    let mut flush_interval = tokio::time::interval(Duration::from_secs(5));
+    loop {
+        flush_interval.tick().await;
+        flush_to_api(&state).await;
     }
-
-    Ok(())
 }
 
-async fn handle_telemetry_event(state: Arc<Mutex<AgentState>>, event: TelemetryEvent) {
-    let mut state = state.lock().await;
+// --- Helpers ---
 
-    let (pipeline_id, api_event) = match event {
-        TelemetryEvent::Lifecycle(e) => {
-            let payload = serde_json::json!({
-                "event": e.event,
-                "uptime_ms": e.uptime_ms,
-                "metadata": e.metadata,
-            });
-            (
-                e.pipeline_id,
-                ApiEvent {
-                    event_type: "LIFECYCLE".to_string(),
-                    timestamp: e.timestamp as i64,
-                    payload,
-                },
-            )
-        }
-        TelemetryEvent::Progress(e) => {
-            let payload = serde_json::json!({
-                "current": e.current,
-                "total": e.total,
-                "percent": e.percent,
-                "eta_seconds": e.eta_seconds,
-            });
-            (
-                e.pipeline_id,
-                ApiEvent {
-                    event_type: "PROGRESS".to_string(),
-                    timestamp: now_secs() as i64,
-                    payload,
-                },
-            )
-        }
-        TelemetryEvent::Metric(e) => {
-            let payload = serde_json::json!({
-                "name": e.name,
-                "value": e.value,
-            });
-            (
-                e.pipeline_id,
-                ApiEvent {
-                    event_type: "METRIC".to_string(),
-                    timestamp: now_secs() as i64,
-                    payload,
-                },
-            )
-        }
+async fn process_sdk_event(state: &Arc<Mutex<AgentState>>, event: TelemetryEvent) {
+    let mut locked = state.lock().await;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+
+    let (pid, api_evt) = match event {
+        TelemetryEvent::Handshake(e) => {
+            // THE CHECK
+            if e.sdk_version != AGENT_VERSION {
+                eprintln!("🚨 VERSION MISMATCH! SDK: {}, Agent: {}", e.sdk_version, AGENT_VERSION);
+                eprintln!("   This pipeline is incompatible with the current platform.");
+                
+                // OPTION 1: Suicide (Kill the Pod)
+                // We send a signal to Kubernetes that we are unhealthy
+                std::process::exit(1); 
+                
+                // OPTION 2: Alert Only (Soft Mode)
+                // emit_alert_to_control_plane("VersionMismatch", ...);
+            }
+            // For now, we don't add to buffer, just validate
+            return;
+        },
+        TelemetryEvent::Lifecycle(e) => (
+            e.pipeline_id, 
+            ApiEvent { event_type: "LIFECYCLE".into(), timestamp: now, payload: serde_json::to_value(e).unwrap() }
+        ),
+        TelemetryEvent::Progress(e) => (
+            e.pipeline_id,
+            ApiEvent { event_type: "PROGRESS".into(), timestamp: now, payload: serde_json::to_value(e).unwrap() }
+        ),
+        TelemetryEvent::DataQuality(e) => (
+            // Extract ID from inner payload or pass generic
+            "unknown".into(), 
+            ApiEvent { event_type: "DATA_QUALITY".into(), timestamp: now, payload: e.contract }
+        ),
     };
 
-    // Get or create pipeline state
-    let pipeline = state.pipelines.entry(pipeline_id.clone()).or_insert_with(|| {
-        println!("🆕 New pipeline registered: {}", pipeline_id);
-        PipelineState {
-            events: Vec::new(),
-            last_seen: Instant::now(),
-            cpu_nano: 0,
-            mem_bytes: 0,
-        }
-    });
-
-    pipeline.events.push(api_event);
-    pipeline.last_seen = Instant::now();
-
-    // Simple resource estimation (in real impl, use sysinfo crate)
-    pipeline.cpu_nano = estimate_cpu_usage();
-    pipeline.mem_bytes = estimate_memory_usage();
+    locked.event_buffer.entry(pid).or_default().push(api_evt);
 }
 
-async fn flush_telemetry(state: Arc<Mutex<AgentState>>) -> anyhow::Result<()> {
-    let mut state = state.lock().await;
-
-    if state.pipelines.is_empty() {
-        return Ok(());
+async fn flush_to_api(state: &Arc<Mutex<AgentState>>) {
+    let mut locked = state.lock().await;
+    
+    // 1. Get Billing Data (Resource Usage)
+    // The tracker returns a list of { pod_uid, cpu_seconds, mem_seconds }
+    let usage_events = locked.tracker.flush();
+    
+    // 2. Merge with Event Buffer
+    // We iterate known pipelines from the event buffer OR the usage tracker
+    let mut pipelines: Vec<String> = locked.event_buffer.keys().cloned().collect();
+    for u in &usage_events {
+        if !pipelines.contains(&u.pod_uid) {
+            pipelines.push(u.pod_uid.clone());
+        }
     }
 
-    let mut flushed_count = 0;
-    let mut stale_pipelines = Vec::new();
+    for pid in pipelines {
+        let events = locked.event_buffer.remove(&pid).unwrap_or_default();
+        
+        // Find matching usage for this pipeline
+        let usage = usage_events.iter().find(|u| u.pod_uid == pid).map(|u| ResourceUsage {
+            cpu_core_seconds: u.cpu_core_seconds,
+            mem_gb_seconds: u.mem_gb_seconds,
+        });
 
-    for (pipeline_id, pipeline) in state.pipelines.iter_mut() {
-        // Skip if no new events
-        if pipeline.events.is_empty() {
-            // Check for stale pipelines (no heartbeat for 60s)
-            if pipeline.last_seen.elapsed() > Duration::from_secs(60) {
-                stale_pipelines.push(pipeline_id.clone());
-            }
-            continue;
-        }
+        if events.is_empty() && usage.is_none() { continue; }
 
-        // Build payload
         let payload = AgentPayload {
-            pipeline_id: pipeline_id.clone(),
-            events: std::mem::take(&mut pipeline.events),
-            stats: Some(ResourceStats {
-                cpu_nano: pipeline.cpu_nano,
-                mem_bytes: pipeline.mem_bytes,
-            }),
+            pipeline_id: pid.clone(),
+            events,
+            usage,
         };
 
-        // Send to API
-        match state.client.post(&state.api_url).json(&payload).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                flushed_count += 1;
-            }
-            Ok(resp) => {
-                eprintln!("⚠️  API returned {} for {}", resp.status(), pipeline_id);
-            }
-            Err(e) => {
-                eprintln!("❌ Failed to send telemetry for {}: {}", pipeline_id, e);
-                // Put events back for retry
-                pipeline.events = payload.events;
-            }
-        }
+        // Fire and Forget
+        let _ = locked.client.post(&locked.api_url).json(&payload).send().await;
     }
-
-    // Remove stale pipelines
-    for id in stale_pipelines {
-        println!("💀 Pipeline {} removed (stale)", id);
-        state.pipelines.remove(&id);
-    }
-
-    if flushed_count > 0 {
-        println!("✅ Flushed {} pipelines to API", flushed_count);
-    }
-
-    Ok(())
-}
-
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-// Placeholder for CPU estimation - replace with sysinfo crate
-fn estimate_cpu_usage() -> i64 {
-    // In real implementation, use sysinfo::System
-    0
-}
-
-// Placeholder for memory estimation - replace with sysinfo crate
-fn estimate_memory_usage() -> i64 {
-    // In real implementation, use sysinfo::System
-    0
 }

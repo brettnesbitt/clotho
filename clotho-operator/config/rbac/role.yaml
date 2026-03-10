@@ -7,10 +7,23 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - persistentvolumeclaims
   - secrets
   verbs:
   - get
   - list
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - core.clotho.run
@@ -33,7 +46,7 @@ rules:
   - patch
   - update
 - apiGroups:
-  - core.spinwasm.org
+  - core.spinkube.dev
   resources:
   - spinapps
   verbs:

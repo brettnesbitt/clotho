@@ -8,12 +8,36 @@ import (
 // PipelineSpec defines the desired state of Pipeline
 type PipelineSpec struct {
 	// 1. Source Control (The "Code")
-	// +kubebuilder:validation:Required
-	GitRepository string `json:"gitRepository"`
+	// If provided, the Clotho Builder will clone, compile, and push to the internal registry.
+	// If omitted and Image is provided, the builder is skipped entirely (Tier 2: BYOR).
+	// +optional
+	GitRepository string `json:"gitRepository,omitempty"`
 
 	// Reference is the branch, tag, or commit. Defaults to "main".
 	// +kubebuilder:default:="main"
 	Reference string `json:"reference,omitempty"`
+
+	// GitCredentialsSecret is the name of a Secret containing git credentials.
+	// The secret should have a "token" key with a GitHub PAT or similar token.
+	// +optional
+	GitCredentialsSecret string `json:"gitCredentialsSecret,omitempty"`
+
+	// Path is the subdirectory within the repository containing the pipeline code.
+	// Use this for monorepos where the Cargo.toml is not at the root.
+	// +optional
+	Path string `json:"path,omitempty"`
+
+	// Image is the OCI image reference for the built pipeline.
+	// For Tier 1 (builder): populated automatically after build completes.
+	// For Tier 2 (BYOR): set by the user to skip the builder entirely.
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// ImagePullSecrets is a list of references to secrets for pulling from private registries.
+	// Only needed for Tier 2 (BYOR) when the image is in a private external registry (GCP, AWS, etc).
+	// These are passed through to the SpinApp so Kubernetes can authenticate the pull.
+	// +optional
+	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
 
 	// 2. Runtime Configuration (The "Variables")
 	// Defines environment variables and secret injections.
