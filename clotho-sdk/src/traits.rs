@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use anyhow::Result;
-use polars::prelude::DataFrame;
-use crate::types::Context;
+pub use crate::types::Context;
 
 #[async_trait]
 pub trait Source<T>: Send + Sync {
@@ -19,9 +18,10 @@ pub trait Sink<T>: Send + Sync {
     async fn write(&mut self, item: Context<T>) -> Result<()>;
 }
 
+#[cfg(feature = "batch")]
 #[async_trait]
 pub trait LookupTarget {
     /// Takes a batch of keys, queries the underlying datastore, 
     /// and returns a Polars DataFrame ready for joining.
-    async fn lookup_batch(&self, keys: Vec<&str>) -> Result<DataFrame>;
+    async fn lookup_batch(&self, keys: Vec<&str>) -> Result<polars::prelude::DataFrame>;
 }

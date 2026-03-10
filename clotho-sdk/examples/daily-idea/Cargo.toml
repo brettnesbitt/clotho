@@ -11,6 +11,3 @@ path = "main.rs"
 clotho-sdk = { path = "../.." }
 tokio = { version = "1.0", features = ["sync", "macros", "io-util", "rt", "time"] }
 anyhow = "1.0"
-async-trait = "0.1"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"

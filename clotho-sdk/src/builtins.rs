@@ -5,7 +5,6 @@ use async_trait::async_trait;
 use std::fmt::Debug;
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration, Interval};
-use std::marker::PhantomData;
 
 // ============================================================================
 // 1. GENERATORS (SOURCES)

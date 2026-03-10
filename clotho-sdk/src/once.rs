@@ -1,7 +1,6 @@
 use crate::traits::{Sink, Context};
 use crate::telemetry;
 use anyhow::Result;
-use std::marker::PhantomData;
 
 /// Optimized for Webhooks / Serverless Triggers
 pub struct OncePipeline<T> {
@@ -41,7 +40,7 @@ where T: Send + Sync + 'static
         telemetry::emit_lifecycle(&pipeline_id, "STARTUP", Some(boot_ms), None);
 
         // 1. Contextualize
-        let mut context = Context::new(self.payload);
+        let mut context = Context::root(self.payload, "once_pipeline");
         // (In a real impl, we would extract Trace ID from HTTP Headers here!)
 
         // 2. Transform

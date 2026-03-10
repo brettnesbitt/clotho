@@ -1,12 +1,15 @@
 // Clotho SDK Connectors
 // Sources and Sinks for common integrations
 
-pub mod http;
+// Working connectors
 pub mod stdout;
-pub mod kafka;
-pub mod mongo;
-pub mod mqtt;
-pub mod postgres;
-pub mod s3;
-pub mod snowflake;
-pub mod wss;
+
+// TODO: Fix these connectors - missing dependencies or incomplete implementations
+// pub mod http;
+// pub mod kafka;
+// pub mod mongo;
+// pub mod mqtt;
+// pub mod postgres;
+// pub mod s3;
+// pub mod snowflake;
+// pub mod wss;
