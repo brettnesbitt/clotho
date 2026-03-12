@@ -215,7 +215,7 @@ func (r *PipelineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // internalRegistry is the in-cluster OCI registry deployed as part of the Clotho control plane.
-// Builder jobs push here with --insecure. Kubelet pulls locally (fast, no auth, no egress).
+// Builder jobs push to HTTPS endpoint. Kubelet pulls with TLS verification.
 const internalRegistry = "clotho-registry.clotho-system.svc.cluster.local:5000"
 
 func (r *PipelineReconciler) reconcileBuild(ctx context.Context, pipeline *clothov1alpha1.Pipeline) (ctrl.Result, error) {
@@ -298,6 +298,11 @@ func (r *PipelineReconciler) reconcileBuild(ctx context.Context, pipeline *cloth
 								Name:      "build-cache",
 								MountPath: "/app/target",
 							},
+							{
+								Name:      "registry-ca",
+								MountPath: "/tmp/registry-ca",
+								ReadOnly:  true,
+							},
 						},
 					}},
 					Volumes: []corev1.Volume{
@@ -314,6 +319,14 @@ func (r *PipelineReconciler) reconcileBuild(ctx context.Context, pipeline *cloth
 							VolumeSource: corev1.VolumeSource{
 								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 									ClaimName: "clotho-project-cache-pvc",
+								},
+							},
+						},
+						{
+							Name: "registry-ca",
+							VolumeSource: corev1.VolumeSource{
+								Secret: &corev1.SecretVolumeSource{
+									SecretName: "clotho-registry-tls",
 								},
 							},
 						},

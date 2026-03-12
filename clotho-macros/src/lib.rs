@@ -24,30 +24,49 @@ pub fn main(_args: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// Generates the Tokio Runtime wrapper for Long-Running processes
+/// Generates a Spin HTTP component wrapper for pipeline-style (main) functions.
+/// The pipeline runs on each HTTP request and returns results as the response body.
 fn impl_daemon_entrypoint(input_fn: ItemFn) -> TokenStream {
     let body = &input_fn.block;
 
     let expanded = quote! {
-        fn main() -> anyhow::Result<()> {
-            // A. Static Init (Telemetry Clock)
+        #[spin_sdk::http_component]
+        async fn _clotho_generated_handler(
+            _req: spin_sdk::http::Request,
+        ) -> anyhow::Result<impl spin_sdk::http::IntoResponse> {
+            // A. Static Init
             ::clotho::telemetry::mark_birth();
-            
-            // B. Build Tokio Runtime (Current Thread is sufficient for Wasm)
-            // We expect the user to have 'clotho' in their dependencies
-            let rt = ::tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("Failed to build Tokio runtime");
+            let pipeline_id = std::env::var("CLOTHO_PIPELINE_ID")
+                .unwrap_or_else(|_| "pipeline".into());
 
-            // C. Emit Startup Telemetry
-            // We can't use async here yet, so we just set the static start time.
-            // The Pipeline::run() method inside the body will handle the actual "STARTUP" event emission.
+            // B. Emit Startup
+            let boot_ms = ::clotho::telemetry::uptime_ms();
+            ::clotho::telemetry::emit_lifecycle(&pipeline_id, "STARTUP", Some(boot_ms), None);
 
-            // D. Run User Code
-            rt.block_on(async {
-                #body
-            })
+            // C. Run User Pipeline Code
+            let start = std::time::Instant::now();
+            let result: anyhow::Result<()> = async { #body }.await;
+            let duration = start.elapsed().as_millis() as u64;
+
+            // D. Emit Result Telemetry + Build HTTP Response
+            match &result {
+                Ok(_) => {
+                    ::clotho::telemetry::emit_lifecycle(&pipeline_id, "FINISHED", None, Some(duration));
+                    Ok(spin_sdk::http::Response::builder()
+                        .status(200)
+                        .header("content-type", "text/plain")
+                        .body(format!("Pipeline completed in {}ms", duration))
+                        .build())
+                },
+                Err(e) => {
+                    ::clotho::telemetry::emit_error(&pipeline_id, "PIPELINE_FAIL", &e.to_string());
+                    Ok(spin_sdk::http::Response::builder()
+                        .status(500)
+                        .header("content-type", "text/plain")
+                        .body(format!("Pipeline failed: {}", e))
+                        .build())
+                }
+            }
         }
     };
 

@@ -8,5 +8,6 @@ crate-type = ["cdylib"]
 path = "lib.rs"
 
 [dependencies]
+clotho-sdk = { path = "../.." }
 spin-sdk = "3.0"
 anyhow = "1.0"

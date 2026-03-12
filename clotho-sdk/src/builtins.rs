@@ -3,7 +3,10 @@ use crate::types::Context;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::fmt::Debug;
+
+#[cfg(feature = "native")]
 use tokio::sync::mpsc;
+#[cfg(feature = "native")]
 use tokio::time::{self, Duration, Interval};
 
 // ============================================================================
@@ -34,11 +37,14 @@ impl<T: Send + Sync> Source<T> for VecSource<T> {
 
 /// A Source that emits a "Heartbeat" every interval.
 /// Great for Cron-style pipelines (e.g., "Poll API every 60s").
+/// Requires the `native` feature (tokio runtime).
+#[cfg(feature = "native")]
 pub struct IntervalSource {
     interval: Interval,
     tick_count: u64,
 }
 
+#[cfg(feature = "native")]
 impl IntervalSource {
     pub fn new(period: Duration) -> Self {
         let mut interval = time::interval(period);
@@ -51,6 +57,7 @@ impl IntervalSource {
     }
 }
 
+#[cfg(feature = "native")]
 #[async_trait]
 impl Source<u64> for IntervalSource {
     async fn next(&mut self) -> Option<Result<Context<u64>>> {
@@ -101,20 +108,24 @@ impl<T: Send + Sync + 'static> Sink<T> for DevNullSink {
 
 // ============================================================================
 // 3. MEMORY BUS (MOCK KAFKA/QUEUE)
+// Requires the `native` feature (tokio runtime).
 // ============================================================================
 
 /// The MemoryChannel simulates a Topic/Queue.
 /// It splits into a Producer (Sink) and Consumer (Source).
 /// Use this to test "Pipeline A -> Topic -> Pipeline B" logic locally.
+#[cfg(feature = "native")]
 pub fn memory_channel<T>(buffer_size: usize) -> (MemorySink<T>, MemorySource<T>) {
     let (tx, rx) = mpsc::channel(buffer_size);
     (MemorySink { tx }, MemorySource { rx })
 }
 
+#[cfg(feature = "native")]
 pub struct MemorySink<T> {
     tx: mpsc::Sender<Context<T>>,
 }
 
+#[cfg(feature = "native")]
 #[async_trait]
 impl<T: Send + Sync + Debug> Sink<T> for MemorySink<T> {
     async fn write(&mut self, ctx: Context<T>) -> Result<()> {
@@ -124,10 +135,12 @@ impl<T: Send + Sync + Debug> Sink<T> for MemorySink<T> {
     }
 }
 
+#[cfg(feature = "native")]
 pub struct MemorySource<T> {
     rx: mpsc::Receiver<Context<T>>,
 }
 
+#[cfg(feature = "native")]
 #[async_trait]
 impl<T: Send + Sync> Source<T> for MemorySource<T> {
     async fn next(&mut self) -> Option<Result<Context<T>>> {
