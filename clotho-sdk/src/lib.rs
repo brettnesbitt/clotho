@@ -8,6 +8,13 @@ pub mod connectors;
 pub mod builtins;
 pub mod once;
 
+// Re-export the #[clotho::main] proc-macro attribute
+pub use clotho_macros::main;
+
+// Re-export native-only types when feature is enabled
+#[cfg(feature = "native")]
+pub use builtins::{IntervalSource, MemorySink, MemorySource, memory_channel};
+
 // Only compile Batch engine if requested
 #[cfg(feature = "batch")]
 pub mod batch;

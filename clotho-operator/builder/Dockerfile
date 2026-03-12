@@ -15,9 +15,20 @@ RUN curl -fsSL https://developer.fermyon.com/downloads/install.sh | bash && \
 # 3. Add Wasm Target
 RUN rustup target add wasm32-wasip1
 
+# 3.5. Install CA certificate for internal registry (will be mounted at runtime)
+RUN mkdir -p /etc/docker/certs.d/clotho-registry.clotho-system.svc.cluster.local:5000
+
 # 4. Create the Build Script
 RUN echo '#!/bin/bash\n\
 set -e\n\
+\n\
+# Install registry CA certificate if mounted\n\
+if [ -f "/tmp/registry-ca/tls.crt" ]; then\n\
+  echo "Installing registry CA certificate..."\n\
+  cp /tmp/registry-ca/tls.crt /usr/local/share/ca-certificates/clotho-registry.crt\n\
+  update-ca-certificates\n\
+  echo "CA certificate installed successfully"\n\
+fi\n\
 \n\
 REPO_URL=$1\n\
 REF=$2\n\
@@ -44,9 +55,9 @@ cd $PROJECT_PATH\n\
 echo "🔨 Compiling Rust to Wasm..."\n\
 cargo build --target wasm32-wasip1 --release\n\
 \n\
-# C. Package & Push to Internal Registry (no auth needed)\n\
+# C. Package & Push to Internal Registry (TLS enabled, no auth needed)\n\
 echo "📦 Packaging and Pushing to $IMAGE_TAG..."\n\
-spin registry push $IMAGE_TAG --insecure\n\
+spin registry push $IMAGE_TAG\n\
 \n\
 echo "✅ Build Complete!"\n\
 ' > /usr/local/bin/builder.sh && chmod +x /usr/local/bin/builder.sh

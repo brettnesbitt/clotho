@@ -11,7 +11,7 @@ route = "/..."
 component = "daily-idea"
 
 [component.daily-idea]
-source = "target/wasm32-wasip1/release/daily-idea.wasm"
+source = "target/wasm32-wasip1/release/daily_idea.wasm"
 allowed_outbound_hosts = ["https://stockseer.ai:443"]
 [component.daily-idea.build]
 command = "cargo build --target wasm32-wasip1 --release"

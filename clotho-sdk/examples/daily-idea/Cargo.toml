@@ -3,11 +3,11 @@ name = "daily-idea"
 version = "0.1.0"
 edition = "2021"
 
-[[bin]]
-name = "daily-idea"
-path = "main.rs"
+[lib]
+crate-type = ["cdylib"]
+path = "lib.rs"
 
 [dependencies]
 clotho-sdk = { path = "../.." }
-tokio = { version = "1.0", features = ["sync", "macros", "io-util", "rt", "time"] }
+spin-sdk = "3.0"
 anyhow = "1.0"
