@@ -236,6 +236,34 @@ spec:
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
                 type: object
+              schedule:
+                description: |-
+                  5. Schedule (The "When")
+                  Defines how and when the operator invokes this pipeline.
+                  If omitted, defaults to "trigger" mode (on-demand only via API).
+                properties:
+                  cron:
+                    description: |-
+                      Cron is a standard cron expression (e.g. "0 9 * * *").
+                      Only used when mode is "cron".
+                    type: string
+                  interval:
+                    description: |-
+                      Interval is the duration between invocations (e.g. "30s", "5m", "1h").
+                      Only used when mode is "interval".
+                    type: string
+                  mode:
+                    default: trigger
+                    description: 'Mode: "trigger" (on-demand), "interval" (every N
+                      seconds), or "cron" (cron expression).'
+                    enum:
+                    - trigger
+                    - interval
+                    - cron
+                    type: string
+                required:
+                - mode
+                type: object
             type: object
           status:
             description: PipelineStatus defines the observed state of Pipeline
@@ -298,10 +326,15 @@ spec:
                   - type
                   type: object
                 type: array
-              observedGeneration:
+              lastInvocation:
                 description: |-
-                  ADD THIS FIELD:
-                  ObservedGeneration represents the .metadata.generation that the condition was set based upon.
+                  LastInvocation is the timestamp of the last scheduled invocation.
+                  Used by the scheduler to determine when the next invocation should occur.
+                format: date-time
+                type: string
+              observedGeneration:
+                description: ObservedGeneration represents the .metadata.generation
+                  that the condition was set based upon.
                 format: int64
                 type: integer
               phase:

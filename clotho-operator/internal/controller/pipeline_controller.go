@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -56,9 +57,9 @@ func (r *PipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	// 2. Handle Build (Source -> Image)
-	// If this returns a Requeue or Error, stop here.
+	// If this returns a Requeue/RequeueAfter or Error, stop here.
 	// We can't deploy a SpinApp until we have an Image.
-	if res, err := r.reconcileBuild(ctx, &pipeline); err != nil || res.Requeue {
+	if res, err := r.reconcileBuild(ctx, &pipeline); err != nil || res.Requeue || res.RequeueAfter > 0 {
 		return res, err
 	}
 
@@ -107,7 +108,15 @@ func (r *PipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	pipeline.Status.Phase = "Running"
+	// Phase reflects pipeline lifecycle, not pod state:
+	// - Idling:  deployed, trigger-only (no automatic schedule)
+	// - Enabled: deployed with an active schedule
+	// - Running: currently being invoked (set transiently by scheduler)
+	if pipeline.Spec.Schedule != nil && pipeline.Spec.Schedule.Mode != "trigger" {
+		pipeline.Status.Phase = "Enabled"
+	} else {
+		pipeline.Status.Phase = "Idling"
+	}
 
 	// Good practice: Update ObservedGeneration so we know the status matches the spec
 	pipeline.Status.ObservedGeneration = pipeline.Generation
@@ -117,7 +126,9 @@ func (r *PipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{}, nil
+	// 7. Handle Schedule (The "When")
+	// If a schedule is configured, calculate the next invocation and requeue.
+	return r.reconcileSchedule(ctx, &pipeline)
 }
 
 // validateConfig checks if referenced secrets exist
@@ -370,4 +381,114 @@ func (r *PipelineReconciler) buildEnvVars(pipeline *clothov1alpha1.Pipeline) []c
 	})
 
 	return envVars
+}
+
+// reconcileSchedule handles scheduled invocations of pipelines.
+// For "interval" mode, it sends an HTTP request to the pipeline service at the configured interval.
+// For "cron" mode, it calculates the next run time from a cron expression.
+// For "trigger" mode (default), it does nothing.
+func (r *PipelineReconciler) reconcileSchedule(ctx context.Context, pipeline *clothov1alpha1.Pipeline) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+
+	// No schedule configured = trigger mode (on-demand only)
+	if pipeline.Spec.Schedule == nil || pipeline.Spec.Schedule.Mode == "trigger" {
+		return ctrl.Result{}, nil
+	}
+
+	switch pipeline.Spec.Schedule.Mode {
+	case "interval":
+		return r.reconcileIntervalSchedule(ctx, pipeline)
+	case "cron":
+		log.Info("Cron scheduling not yet implemented, treating as trigger mode", "pipeline", pipeline.Name)
+		return ctrl.Result{}, nil
+	default:
+		log.Info("Unknown schedule mode, ignoring", "mode", pipeline.Spec.Schedule.Mode)
+		return ctrl.Result{}, nil
+	}
+}
+
+// reconcileIntervalSchedule handles interval-based pipeline invocation.
+func (r *PipelineReconciler) reconcileIntervalSchedule(ctx context.Context, pipeline *clothov1alpha1.Pipeline) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+
+	interval, err := time.ParseDuration(pipeline.Spec.Schedule.Interval)
+	if err != nil {
+		log.Error(err, "Failed to parse schedule interval", "interval", pipeline.Spec.Schedule.Interval)
+		return ctrl.Result{}, nil
+	}
+
+	now := time.Now()
+
+	// Check if it's time to invoke
+	if pipeline.Status.LastInvocation != nil {
+		elapsed := now.Sub(pipeline.Status.LastInvocation.Time)
+		if elapsed < interval {
+			// Not yet time, requeue for the remaining duration
+			remaining := interval - elapsed
+			log.Info("Waiting for next invocation", "pipeline", pipeline.Name, "remaining", remaining.String())
+			return ctrl.Result{RequeueAfter: remaining}, nil
+		}
+	}
+
+	// Time to invoke the pipeline
+	log.Info("Invoking pipeline on schedule", "pipeline", pipeline.Name, "interval", interval.String())
+
+	// Set phase to Running during invocation
+	pipeline.Status.Phase = "Running"
+	if err := r.Status().Update(ctx, pipeline); err != nil {
+		log.Error(err, "Failed to set Running phase")
+		return ctrl.Result{}, err
+	}
+
+	invokeErr := r.invokePipeline(ctx, pipeline)
+
+	// Refetch before updating status again to avoid conflict
+	if err := r.Get(ctx, types.NamespacedName{Name: pipeline.Name, Namespace: pipeline.Namespace}, pipeline); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Restore phase to Enabled and update LastInvocation
+	pipeline.Status.Phase = "Enabled"
+	nowMeta := metav1.NewTime(now)
+	pipeline.Status.LastInvocation = &nowMeta
+	if err := r.Status().Update(ctx, pipeline); err != nil {
+		log.Error(err, "Failed to update status after invocation")
+		return ctrl.Result{}, err
+	}
+
+	if invokeErr != nil {
+		log.Error(invokeErr, "Failed to invoke pipeline", "pipeline", pipeline.Name)
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
+	log.Info("Pipeline invoked successfully", "pipeline", pipeline.Name, "nextIn", interval.String())
+	return ctrl.Result{RequeueAfter: interval}, nil
+}
+
+// invokePipeline sends an HTTP request to the pipeline's Kubernetes service.
+// The SpinApp exposes an HTTP endpoint; the operator triggers it.
+func (r *PipelineReconciler) invokePipeline(ctx context.Context, pipeline *clothov1alpha1.Pipeline) error {
+	// Build the in-cluster service URL
+	// SpinApp services are created by SpinKube with the same name as the SpinApp
+	serviceURL := fmt.Sprintf("http://%s.%s.svc.cluster.local", pipeline.Name, pipeline.Namespace)
+
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, serviceURL, nil)
+	if err != nil {
+		return fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("X-Clotho-Trigger", "schedule")
+	req.Header.Set("X-Clotho-Pipeline", pipeline.Name)
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("invoking pipeline: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("pipeline returned HTTP %d", resp.StatusCode)
+	}
+
+	return nil
 }

@@ -57,6 +57,30 @@ type PipelineSpec struct {
 	// replicas is the desired number of replicas.
 	// +kubebuilder:default:=1
 	Replicas int32 `json:"replicas,omitempty"`
+
+	// 5. Schedule (The "When")
+	// Defines how and when the operator invokes this pipeline.
+	// If omitted, defaults to "trigger" mode (on-demand only via API).
+	// +optional
+	Schedule *ScheduleSpec `json:"schedule,omitempty"`
+}
+
+// ScheduleSpec defines when the operator invokes a pipeline.
+type ScheduleSpec struct {
+	// Mode: "trigger" (on-demand), "interval" (every N seconds), or "cron" (cron expression).
+	// +kubebuilder:default:="trigger"
+	// +kubebuilder:validation:Enum=trigger;interval;cron
+	Mode string `json:"mode"`
+
+	// Interval is the duration between invocations (e.g. "30s", "5m", "1h").
+	// Only used when mode is "interval".
+	// +optional
+	Interval string `json:"interval,omitempty"`
+
+	// Cron is a standard cron expression (e.g. "0 9 * * *").
+	// Only used when mode is "cron".
+	// +optional
+	Cron string `json:"cron,omitempty"`
 }
 
 // ConfigVar allows injecting values or secrets into the runtime
@@ -102,10 +126,14 @@ type PipelineStatus struct {
 	// URL is the public endpoint if exposed
 	URL string `json:"url,omitempty"`
 
-	// ADD THIS FIELD:
 	// ObservedGeneration represents the .metadata.generation that the condition was set based upon.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// LastInvocation is the timestamp of the last scheduled invocation.
+	// Used by the scheduler to determine when the next invocation should occur.
+	// +optional
+	LastInvocation *metav1.Time `json:"lastInvocation,omitempty"`
 }
 
 // +kubebuilder:object:root=true

@@ -1,0 +1,117 @@
+---
+# Service Account for the Clotho API
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: clotho-api
+  namespace: clotho-system
+  labels:
+    app: clotho-api
+
+---
+# ClusterRole: read access to Pipeline CRs, Pods, and Jobs
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: clotho-api-reader
+  labels:
+    app: clotho-api
+rules:
+  - apiGroups: ["core.clotho.run"]
+    resources: ["pipelines"]
+    verbs: ["get", "list", "watch", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+
+---
+# Bind the ClusterRole to the ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: clotho-api-reader-binding
+  labels:
+    app: clotho-api
+subjects:
+  - kind: ServiceAccount
+    name: clotho-api
+    namespace: clotho-system
+roleRef:
+  kind: ClusterRole
+  name: clotho-api-reader
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clotho-api
+  namespace: clotho-system
+  labels:
+    app: clotho-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: clotho-api
+  template:
+    metadata:
+      labels:
+        app: clotho-api
+    spec:
+      serviceAccountName: clotho-api
+      containers:
+        - name: api
+          image: us-central1-docker.pkg.dev/quotopia-391900/clotho/clotho-api:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 3000
+          env:
+            - name: CLOTHO_NAMESPACE
+              value: "default"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 3
+            periodSeconds: 10
+
+---
+# Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: clotho-api
+  namespace: clotho-system
+  labels:
+    app: clotho-api
+spec:
+  selector:
+    app: clotho-api
+  ports:
+    - port: 3000
+      targetPort: 3000
+      protocol: TCP
