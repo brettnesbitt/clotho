@@ -20,6 +20,8 @@ enum TelemetryEvent {
     Lifecycle(LifecycleEvent),
     Progress(ProgressEvent),
     DataQuality(DataQualityEvent),
+    Throughput(ThroughputEvent),
+    Dlq(DlqEvent),
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -29,6 +31,7 @@ struct LifecycleEvent {
     timestamp: u64,
     boot_latency_ms: Option<u64>,
     ttfr_ms: Option<u64>,
+    runtime_ms: Option<u64>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -41,6 +44,26 @@ struct ProgressEvent {
 #[derive(Deserialize, Serialize, Debug, Clone)]
 struct DataQualityEvent {
     contract: serde_json::Value,
+    timestamp: u64,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+struct ThroughputEvent {
+    pipeline_id: String,
+    records_in: u64,
+    records_out: u64,
+    records_failed: u64,
+    bytes_processed: u64,
+    timestamp: u64,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+struct DlqEvent {
+    pipeline_id: String,
+    trace_id: String,
+    error: String,
+    step: String,
+    payload: String,
     timestamp: u64,
 }
 
@@ -186,6 +209,14 @@ async fn process_sdk_event(state: &Arc<Mutex<AgentState>>, event: TelemetryEvent
             // Extract ID from inner payload or pass generic
             "unknown".into(), 
             ApiEvent { event_type: "DATA_QUALITY".into(), timestamp: now, payload: e.contract }
+        ),
+        TelemetryEvent::Throughput(e) => (
+            e.pipeline_id.clone(),
+            ApiEvent { event_type: "THROUGHPUT".into(), timestamp: now, payload: serde_json::to_value(e).unwrap() }
+        ),
+        TelemetryEvent::Dlq(e) => (
+            e.pipeline_id.clone(),
+            ApiEvent { event_type: "DLQ".into(), timestamp: now, payload: serde_json::to_value(e).unwrap() }
         ),
     };
 

@@ -119,7 +119,7 @@ where
                 }))
             }
             Err(e) => {
-                // DLQ LOGIC
+                // DLQ LOGIC: Route to custom sink if provided, otherwise emit natively
                 if let Some(dlq) = &mut self.dlq {
                     let fail = FailureRecord {
                         original_data: "serialization_skipped".into(),
@@ -129,6 +129,16 @@ where
                     };
                     let fail_ctx = Context::root(fail, "dlq");
                     let _ = dlq.write(fail_ctx).await;
+                } else {
+                    // Native DLQ: emit to Clotho Agent automatically
+                    let pipeline_id = std::env::var("PIPELINE_ID").unwrap_or_default();
+                    telemetry::emit_dlq_record(
+                        &pipeline_id,
+                        &parents.first().map(|s| s.as_str()).unwrap_or("unknown"),
+                        "map",
+                        &e.to_string(),
+                        "serialization_skipped",
+                    );
                 }
                 self.next().await 
             }

@@ -1,7 +1,6 @@
 use clotho::Pipeline;
 use clotho::builtins::{VecSource, ConsoleSink};
 use anyhow::Result;
-use std::time::Duration;
 
 #[clotho::main]
 async fn main() -> Result<()> {
@@ -15,11 +14,6 @@ async fn main() -> Result<()> {
     Pipeline::stream(VecSource::new(ideas))
         .map(|idea| {
             println!("[Signal] {}", idea);
-            
-            // Simulate processing time (30 seconds per idea)
-            // This allows us to see the pipeline in "Running" state in the UI
-            std::thread::sleep(Duration::from_secs(30));
-            
             Ok(idea)
         })
         .run(ConsoleSink::new())

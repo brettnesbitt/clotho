@@ -116,17 +116,33 @@ where S: Source<DataFrame> + 'static
         let pipeline_id = std::env::var("CLOTHO_PIPELINE_ID").unwrap_or("local".into());
         let boot_ms = telemetry::uptime_ms();
         
+        eprintln!("[Clotho] Pipeline Started: {}", pipeline_id);
+        eprintln!("[Clotho] Mode: Batch (columnar/Polars)");
+        
         telemetry::emit_lifecycle(&pipeline_id, "STARTUP", Some(boot_ms), None);
 
         let mut is_first_batch = true;
+        let mut records_in: u64 = 0;
+        let mut records_out: u64 = 0;
+        let mut records_failed: u64 = 0;
+        let mut bytes_processed: u64 = 0;
+        let mut batch_count: u64 = 0;
 
         while let Some(ctx_result) = self.source.next().await {
             match ctx_result {
                 Ok(mut ctx) => {
+                    batch_count += 1;
+                    let input_rows = ctx.data.height() as u64;
+                    let input_cols = ctx.data.width();
+                    records_in += input_rows;
+
                     if is_first_batch {
+                        eprintln!("[Clotho] First batch received: {} rows × {} columns", input_rows, input_cols);
                         let ttfr = telemetry::uptime_ms();
                         telemetry::emit_lifecycle(&pipeline_id, "FIRST_BATCH", Some(boot_ms), Some(ttfr));
                         is_first_batch = false;
+                    } else {
+                        eprintln!("[Clotho] Batch #{}: {} rows × {} columns", batch_count, input_rows, input_cols);
                     }
 
                     // 1. Convert Eager DataFrame to Lazy
@@ -138,30 +154,51 @@ where S: Source<DataFrame> + 'static
                     }
 
                     // 3. EXECUTE (The Heavy Lift)
-                    // This runs in the Polars Thread Pool (Native Threads)
                     match lf.collect() {
                         Ok(result_df) => {
+                            // Track output rows + estimate bytes
+                            let output_rows = result_df.height() as u64;
+                            let output_cols = result_df.width();
+                            records_out += output_rows;
+                            bytes_processed += result_df.estimated_size() as u64;
+
+                            eprintln!("[Clotho] Transformed batch #{}: {} rows → {} rows ({} columns)", 
+                                batch_count, input_rows, output_rows, output_cols);
+
                             // 4. Update Context & Sink
-                            // We replace the data payload with the transformed batch
                             ctx.data = result_df;
                             
                             // 5. Emit Batch Metrics (Rows Processed)
-                            telemetry::report_progress(&pipeline_id, ctx.data.height() as u64, None);
+                            telemetry::report_progress(&pipeline_id, records_out, None);
                             
-                            sink.write(ctx).await?;
+                            if let Err(e) = sink.write(ctx).await {
+                                eprintln!("[Clotho] Sink write failed for batch #{}: {}", batch_count, e);
+                                return Err(e);
+                            }
+                            eprintln!("[Clotho] Sent batch #{} to sink", batch_count);
                         },
                         Err(e) => {
-                            // Batch Failure -> DLQ
-                            eprintln!("Batch Execution Failed: {}", e);
+                            // Entire batch failed
+                            records_failed += input_rows;
+                            eprintln!("[Clotho] Batch #{} execution failed: {} ({} rows sent to DLQ)", batch_count, e, input_rows);
                             telemetry::emit_error(&pipeline_id, "BATCH_FAIL", &e.to_string());
                         }
                     }
+
+                    // Emit cumulative throughput per batch
+                    telemetry::emit_throughput(&pipeline_id, records_in, records_out, records_failed, bytes_processed);
                 }
-                Err(e) => eprintln!("Source Error: {}", e),
+                Err(e) => {
+                    records_failed += 1;
+                    eprintln!("[Clotho] Source error: {}", e);
+                }
             }
         }
         
-        telemetry::emit_lifecycle(&pipeline_id, "FINISHED", None, None);
+        let runtime_ms = telemetry::uptime_ms() - boot_ms;
+        eprintln!("[Clotho] Pipeline End: {} batches, {} records in, {} records out, {} failed ({}ms)", 
+            batch_count, records_in, records_out, records_failed, runtime_ms);
+        telemetry::emit_lifecycle_with_runtime(&pipeline_id, "FINISHED", None, None, Some(runtime_ms));
         Ok(())
     }
 }
