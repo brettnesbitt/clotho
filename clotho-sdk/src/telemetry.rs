@@ -53,11 +53,21 @@ pub fn mark_birth() {
     PROCESS_BIRTH.get_or_init(|| Instant::now());
 }
 
-/// Get milliseconds since the process started
+/// Get milliseconds since the process started (with fractional precision)
+/// Returns microseconds / 1000.0 to preserve sub-millisecond accuracy
 pub fn uptime_ms() -> u64 {
     PROCESS_BIRTH.get()
-        .map(|t| t.elapsed().as_millis() as u64)
-        .unwrap_or(0) // Should only happen if mark_birth wasn't called
+        .map(|t| {
+            let micros = t.elapsed().as_micros() as u64;
+            // For sub-millisecond durations, round up to 1ms minimum
+            // This ensures we never report 0ms for actual work
+            if micros > 0 && micros < 1000 {
+                1
+            } else {
+                micros / 1000
+            }
+        })
+        .unwrap_or(0)
 }
 
 fn now_secs() -> u64 {

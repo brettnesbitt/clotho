@@ -1,0 +1,23 @@
+Functional Source License, Version 1.1
+
+Copyright (c) 2026  Brett Nesbitt
+
+Licensor: Brett Nesbitt
+
+Software: Clotho Data Platform (clotho-sdk, clotho-operator, clotho-agent)
+
+Additional Purpose Restriction: You may not use the Software to provide a commercial hosted pipeline, ETL, or data integration service that competes with the Licensor's hosted products.
+
+Change Date: 2 years from the date of the applicable commit or release.
+
+Change License: Apache License 2.0.
+
+---
+
+**Terms:**
+
+1.  **Grant:** Licensor grants you the non-exclusive right to use, copy, modify, and distribute the Software, subject to the conditions of this license.
+2.  **Purpose Restriction:** You may only use the Software for internal business purposes. You may not use the Software for the Additional Purpose Restriction stated above. 
+3.  **Change Date:** On the Change Date, this license automatically converts to the Change License.
+4.  **Notices:** You must retain all copyright and license notices.
+5.  **No Warranty:** THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
