@@ -67,6 +67,7 @@ where
 
         telemetry::mark_birth();
         let boot_ms = telemetry::uptime_ms();
+        let start_time = std::time::Instant::now();
 
         eprintln!("[Clotho] Pipeline Started: {}", pipeline_id);
         eprintln!("[Clotho] Mode: Stream (item-by-item, zero-copy)");
@@ -149,8 +150,11 @@ where
         }
 
         // Final flush
-        let runtime_ms = telemetry::uptime_ms() - boot_ms;
-        eprintln!("[Clotho] Pipeline End: {} records in, {} records out, {} failed ({}ms)", records_in, records_out, records_failed, runtime_ms);
+        let elapsed = start_time.elapsed();
+        let runtime_micros = elapsed.as_micros() as u64;
+        let runtime_ms = (runtime_micros + 999) / 1000; // Round up to nearest ms, minimum 1ms
+        eprintln!("[Clotho] Pipeline End: {} records in, {} records out, {} failed ({}µs / {}ms)", 
+                  records_in, records_out, records_failed, runtime_micros, runtime_ms);
         telemetry::emit_throughput(&pipeline_id, records_in, records_out, records_failed, bytes_processed);
         telemetry::emit_lifecycle_with_runtime(&pipeline_id, "FINISHED", None, None, Some(runtime_ms));
 
