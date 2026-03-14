@@ -90,6 +90,12 @@ where
                 Ok(initial_ctx) => {
                     records_in += 1;
                     
+                    // Estimate bytes processed by serializing the payload
+                    // This gives us a rough measure of data volume flowing through
+                    if let Ok(json) = serde_json::to_string(&initial_ctx.data) {
+                        bytes_processed += json.len() as u64;
+                    }
+                    
                     let trace_id = initial_ctx.span_id.clone();
                     
                     // We wrap the context in an Option so we can safely take() ownership
