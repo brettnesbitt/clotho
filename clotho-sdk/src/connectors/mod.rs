@@ -6,7 +6,10 @@ pub mod stdout;
 
 // TODO: Fix these connectors - missing dependencies or incomplete implementations
 // pub mod http;
-// pub mod kafka;
+
+pub mod kafka;
+pub mod mongo_atlas;
+
 // pub mod mongo;
 // pub mod mqtt;
 // pub mod postgres;

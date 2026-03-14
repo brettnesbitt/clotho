@@ -1,143 +1,97 @@
-use crate::traits::{Sink, Source, Context};
+use crate::traits::{Source, Sink, Context};
 use anyhow::Result;
-use reqwest::{Client, Method, header};
-use std::time::Duration;
-use serde::Serialize;
+use async_trait::async_trait;
+use reqwest::{Client, Method, header::HeaderMap};
 
-/// HTTP Sink: Sends data to a URL (Webhook)
+#[cfg(feature = "batch")]
+use polars::prelude::*;
+
 pub struct HttpSink {
+    client: Client,
     url: String,
     method: Method,
-    client: Client,
-    headers: header::HeaderMap,
+    headers: HeaderMap,
 }
 
 impl HttpSink {
-    pub fn new(url_env: &str) -> Self {
-        let url = std::env::var(url_env).unwrap_or_else(|_| url_env.to_string());
-        
-        let mut headers = header::HeaderMap::new();
-        headers.insert(header::CONTENT_TYPE, header::HeaderValue::from_static("application/json"));
-        
-        // Optional: Auth Token
-        if let Ok(token) = std::env::var("HTTP_AUTH_TOKEN") {
-             let mut auth_val = header::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap();
-             auth_val.set_sensitive(true);
-             headers.insert(header::AUTHORIZATION, auth_val);
-        }
-
+    pub fn new(url: &str) -> Self {
         Self {
-            url,
-            method: Method::POST, // Default to POST
-            client: Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .expect("Failed to build HTTP client"),
-            headers,
+            client: Client::new(),
+            url: url.to_string(),
+            method: Method::POST,
+            headers: HeaderMap::new(),
         }
     }
 
-    pub fn method(mut self, method: Method) -> Self {
-        self.method = method;
+    pub fn with_header(mut self, key: &str, value: &str) -> Self {
+        self.headers.insert(
+            reqwest::header::HeaderName::from_bytes(key.as_bytes()).unwrap(),
+            reqwest::header::HeaderValue::from_str(value).unwrap()
+        );
         self
     }
 }
 
-#[async_trait::async_trait]
-impl<T> Sink<T> for HttpSink 
-where T: Serialize + Send + Sync 
-{
-    async fn write(&mut self, ctx: Context<T>) -> Result<()> {
-        let payload = serde_json::to_value(&ctx.data)?;
-
-        // Simple Retry Logic (Exponential Backoff could go here)
-        let mut attempts = 0;
-        loop {
-            attempts += 1;
-            let resp = self.client.request(self.method.clone(), &self.url)
-                .headers(self.headers.clone())
-                .json(&payload)
-                .send()
-                .await;
-
-            match resp {
-                Ok(r) if r.status().is_success() => break, // Success
-                Ok(r) => {
-                    eprintln!("HTTP Sink Error: Status {}", r.status());
-                    if attempts >= 3 { return Err(anyhow::anyhow!("HTTP {} Failed", r.status())); }
-                },
-                Err(e) => {
-                    eprintln!("HTTP Sink Network Error: {}", e);
-                    if attempts >= 3 { return Err(e.into()); }
-                }
-            }
-            // Wait before retry
-            tokio::time::sleep(Duration::from_millis(500 * attempts)).await;
-        }
+// THE STREAM SINK (Webhooks, Slack Alerts)
+#[async_trait]
+impl Sink<serde_json::Value> for HttpSink {
+    async fn write(&mut self, ctx: Context<serde_json::Value>) -> Result<()> {
+        let mut req_headers = self.headers.clone();
         
+        // DISTRIBUTED TRACING: Pass the Trace ID to the next microservice!
+        req_headers.insert(
+            "X-Clotho-Trace-Id", 
+            reqwest::header::HeaderValue::from_str(&ctx.span_id)?
+        );
+
+        self.client.request(self.method.clone(), &self.url)
+            .headers(req_headers)
+            .json(&ctx.data)
+            .send()
+            .await?
+            .error_for_status()?;
+
         Ok(())
     }
 }
 
-/// HTTP Source: Polls an API endpoint
-pub struct HttpSource<T> {
-    url: String,
+// THE BATCH SOURCE (API Polling for ETL)
+pub struct HttpSource {
     client: Client,
-    poll_interval: Duration,
-    last_seen_id: Option<String>, // Simple Deduplication
-    _marker: std::marker::PhantomData<T>,
+    url: String,
+    has_run: bool, // Simple toggle for a one-shot batch pull
 }
 
-impl<T> HttpSource<T> {
-    pub fn new(url: &str, interval_secs: u64) -> Self {
-        Self {
-            url: url.to_string(),
-            client: Client::new(),
-            poll_interval: Duration::from_secs(interval_secs),
-            last_seen_id: None,
-            _marker: std::marker::PhantomData,
-        }
+impl HttpSource {
+    pub fn new(url: &str) -> Self {
+        Self { client: Client::new(), url: url.to_string(), has_run: false }
     }
 }
 
-// We implement Source specifically for JSON arrays or objects
-#[async_trait::async_trait]
-impl<T> Source<T> for HttpSource<T> 
-where T: serde::de::DeserializeOwned + Send + Sync + Clone 
-{
-    async fn next(&mut self) -> Option<Result<Context<T>>> {
-        loop {
-            // 1. Wait for the interval
-            tokio::time::sleep(self.poll_interval).await;
+#[cfg(feature = "batch")]
+#[async_trait]
+impl Source<DataFrame> for HttpSource {
+    async fn next(&mut self) -> Option<Result<Context<DataFrame>>> {
+        if self.has_run { return None; } // Only pull once per trigger
+        self.has_run = true;
 
-            // 2. Fetch Data
-            let resp = match self.client.get(&self.url).send().await {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("HTTP Poll Failed: {}", e);
-                    continue; // Retry next loop
-                }
-            };
+        let res = match self.client.get(&self.url).send().await {
+            Ok(r) => r,
+            Err(e) => return Some(Err(e.into())),
+        };
 
-            // 3. Parse JSON
-            // We assume the API returns a list of items `[{}, {}]` 
-            // OR a single item `{}`. For this example, let's say it returns a single T.
-            match resp.json::<T>().await {
-                Ok(data) => {
-                    // TODO: Implement proper dedup logic here (compare hash or ID)
-                    
-                    return Some(Ok(Context {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        trace_id: uuid::Uuid::new_v4().to_string(),
-                        data,
-                        metadata: std::collections::HashMap::new(),
-                    }));
-                }
-                Err(e) => {
-                    eprintln!("HTTP Parse Error: {}", e);
-                    continue;
-                }
-            }
+        // Expecting the API to return a JSON Array: [{"id": 1}, {"id": 2}]
+        let bytes = match res.bytes().await {
+            Ok(b) => b.to_vec(),
+            Err(e) => return Some(Err(e.into())),
+        };
+
+        let cursor = std::io::Cursor::new(bytes);
+        
+        // Polars can read standard JSON arrays natively
+        match polars::io::json::JsonReader::new(cursor).finish() {
+            Ok(df) => Some(Ok(Context::root(df, "http_batch"))),
+            Err(e) => Some(Err(anyhow::anyhow!("API did not return a valid JSON array: {}", e)))
         }
     }
 }
