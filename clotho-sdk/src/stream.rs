@@ -120,6 +120,20 @@ where
         eprintln!("[Clotho] Pipeline End: {} records in, {} records out, {} failed ({}ms)", records_in, records_out, records_failed, runtime_ms);
         telemetry::emit_throughput(&pipeline_id, records_in, records_out, records_failed, bytes_processed);
         telemetry::emit_lifecycle_with_runtime(&pipeline_id, "FINISHED", None, None, Some(runtime_ms));
+
+        // Store execution report for the macro to POST via HTTP
+        telemetry::set_execution_report(telemetry::ExecutionReport {
+            pipeline_id: pipeline_id.clone(),
+            started_at: String::new(),
+            duration_ms: runtime_ms,
+            status: "completed".into(),
+            records_in,
+            records_out,
+            records_failed,
+            bytes_processed,
+            log_lines: vec![],
+        });
+
         Ok(())
     }
 }

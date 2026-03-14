@@ -4,9 +4,10 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: clotho-api
-  namespace: clotho-system
+  namespace: clotho-control
   labels:
     app: clotho-api
+    plane: control
 
 ---
 # ClusterRole: read access to Pipeline CRs, Pods, and Jobs
@@ -16,6 +17,7 @@ metadata:
   name: clotho-api-reader
   labels:
     app: clotho-api
+    plane: control
 rules:
   - apiGroups: ["core.clotho.run"]
     resources: ["pipelines"]
@@ -44,7 +46,7 @@ metadata:
 subjects:
   - kind: ServiceAccount
     name: clotho-api
-    namespace: clotho-system
+    namespace: clotho-control
 roleRef:
   kind: ClusterRole
   name: clotho-api-reader
@@ -56,9 +58,10 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: clotho-api
-  namespace: clotho-system
+  namespace: clotho-control
   labels:
     app: clotho-api
+    plane: control
 spec:
   replicas: 1
   selector:
@@ -105,9 +108,10 @@ apiVersion: v1
 kind: Service
 metadata:
   name: clotho-api
-  namespace: clotho-system
+  namespace: clotho-control
   labels:
     app: clotho-api
+    plane: control
 spec:
   selector:
     app: clotho-api

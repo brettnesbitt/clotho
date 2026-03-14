@@ -5,6 +5,7 @@ metadata:
   namespace: clotho-system
   labels:
     app: clotho-agent
+    plane: data
 spec:
   selector:
     matchLabels:
@@ -16,14 +17,21 @@ spec:
     spec:
       # CRITICAL: This allows the Wasm pods to talk to the agent on localhost
       hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: clotho-agent
       containers:
       - name: clotho-agent
         image: us-central1-docker.pkg.dev/quotopia-391900/clotho/clotho-agent:latest
+        imagePullPolicy: Always
         ports:
         - containerPort: 8125
           hostPort: 8125
           name: telemetry-udp
           protocol: UDP
+        - containerPort: 8126
+          hostPort: 8126
+          name: telemetry-http
+          protocol: TCP
         resources:
           limits:
             cpu: 100m
@@ -33,4 +41,4 @@ spec:
             memory: 32Mi
         env:
         - name: CLOTHO_API_URL
-          value: "http://clotho-api.clotho-system.svc.cluster.local:3000"
+          value: "http://clotho-api.clotho-control.svc.cluster.local:3000"

@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: clotho-agent
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: clotho-agent
+    plane: data
+    {{- include "clotho.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      name: clotho-agent
+  template:
+    metadata:
+      labels:
+        name: clotho-agent
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: clotho-agent
+      containers:
+      - name: clotho-agent
+        image: {{ include "clotho.agentImage" . }}
+        imagePullPolicy: Always
+        ports:
+        - containerPort: {{ .Values.agent.ports.udp }}
+          hostPort: {{ .Values.agent.ports.udp }}
+          name: telemetry-udp
+          protocol: UDP
+        - containerPort: {{ .Values.agent.ports.http }}
+          hostPort: {{ .Values.agent.ports.http }}
+          name: telemetry-http
+          protocol: TCP
+        resources:
+          requests:
+            cpu: {{ .Values.agent.resources.requests.cpu }}
+            memory: {{ .Values.agent.resources.requests.memory }}
+          limits:
+            cpu: {{ .Values.agent.resources.limits.cpu }}
+            memory: {{ .Values.agent.resources.limits.memory }}
+        env:
+        - name: CLOTHO_API_URL
+          value: {{ .Values.controlPlaneUrl | quote }}

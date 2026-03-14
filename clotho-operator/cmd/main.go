@@ -20,8 +20,8 @@ import (
 	// Clotho API
 	clothov1alpha1 "github.com/brettnesbitt/clotho/api/v1alpha1"
 	"github.com/brettnesbitt/clotho/internal/controller"
+	"github.com/brettnesbitt/clotho/internal/phonehome"
 
-	// --- ADD THIS IMPORT ---
 	// SpinKube API
 	spinva1 "github.com/spinkube/spin-operator/api/v1alpha1"
 )
@@ -176,6 +176,18 @@ func main() {
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
+
+	// Phone Home tunnel — outbound connection to SaaS Control Plane.
+	// Only enabled when CLOTHO_API_KEY is set (injected from K8s Secret).
+	if phClient := phonehome.NewFromEnv(mgr.GetClient(), ctrl.Log); phClient != nil {
+		if err := mgr.Add(phClient); err != nil {
+			setupLog.Error(err, "Failed to add Phone Home client")
+			os.Exit(1)
+		}
+		setupLog.Info("Phone Home tunnel enabled", "controlPlane", phClient.ControlPlane)
+	} else {
+		setupLog.Info("Phone Home tunnel disabled (CLOTHO_API_KEY not set)")
+	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "Failed to set up health check")

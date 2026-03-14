@@ -1,0 +1,12 @@
+apiVersion: v2
+name: clotho-control
+description: "Clotho Control Plane - API + UI + telemetry database (Enterprise air-gapped deployment)"
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - control-plane
+  - telemetry
+  - data-pipelines
+maintainers:
+  - name: Brett Nesbitt

@@ -1,0 +1,27 @@
+# Clotho Control Plane Helm Values
+# This chart deploys the Control Plane: API + UI + embedded telemetry DB.
+# For Enterprise air-gapped deployments or local development.
+# SaaS customers do NOT need this chart - Clotho hosts the Control Plane for them.
+
+# -- Namespace for control plane components
+namespace: clotho-control
+
+# -- Namespace where pipelines run (for K8s API reads)
+pipelineNamespace: default
+
+# -- Container Registry
+registry: us-central1-docker.pkg.dev/quotopia-391900/clotho
+
+# -- Clotho API (Deployment + Service)
+api:
+  image: clotho-api
+  tag: latest
+  replicas: 1
+  port: 3000
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi

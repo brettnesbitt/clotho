@@ -1,6 +1,11 @@
 # Build stage
-FROM rust:1.94-slim AS builder
+FROM rust:1.94-slim-bookworm AS builder
 WORKDIR /app
+
+# Install system deps for openssl-sys
+RUN apt-get update && apt-get install -y \
+    pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 # Cache dependencies
 COPY Cargo.toml Cargo.lock ./
@@ -16,4 +21,5 @@ RUN cargo build --release
 FROM gcr.io/distroless/cc-debian12
 COPY --from=builder /app/target/release/clotho-agent /clotho-agent
 EXPOSE 8125/udp
+EXPOSE 8126/tcp
 CMD ["/clotho-agent"]

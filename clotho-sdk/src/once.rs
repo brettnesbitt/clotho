@@ -58,7 +58,22 @@ where T: Send + Sync + 'static
         sink.write(context).await?;
 
         // Emit SUCCESS
-        telemetry::emit_lifecycle(&pipeline_id, "FINISHED", None, None);
+        let runtime_ms = telemetry::uptime_ms() - boot_ms;
+        telemetry::emit_lifecycle_with_runtime(&pipeline_id, "FINISHED", None, None, Some(runtime_ms));
+
+        // Store execution report for the macro to POST via HTTP
+        telemetry::set_execution_report(telemetry::ExecutionReport {
+            pipeline_id: pipeline_id.clone(),
+            started_at: String::new(),
+            duration_ms: runtime_ms,
+            status: "completed".into(),
+            records_in: 1,
+            records_out: 1,
+            records_failed: 0,
+            bytes_processed: 0,
+            log_lines: vec![],
+        });
+
         Ok(())
     }
 }
