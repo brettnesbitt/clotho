@@ -1,9 +1,12 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -29,7 +32,8 @@ import (
 // PipelineReconciler reconciles a Pipeline object
 type PipelineReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme          *runtime.Scheme
+	ControlPlaneURL string // e.g. "http://clotho-api.clotho-control.svc.cluster.local:3000"
 }
 
 // +kubebuilder:rbac:groups=core.clotho.run,resources=pipelines,verbs=get;list;watch;create;update;patch;delete
@@ -467,7 +471,11 @@ func (r *PipelineReconciler) reconcileIntervalSchedule(ctx context.Context, pipe
 
 // invokePipeline sends an HTTP request to the pipeline's Kubernetes service.
 // The SpinApp exposes an HTTP endpoint; the operator triggers it.
+// If the response contains an execution report (x-clotho-execution header),
+// the operator forwards it to the Control Plane API.
 func (r *PipelineReconciler) invokePipeline(ctx context.Context, pipeline *clothov1alpha1.Pipeline) error {
+	log := log.FromContext(ctx)
+
 	// Build the in-cluster service URL
 	// SpinApp services are created by SpinKube with the same name as the SpinApp
 	serviceURL := fmt.Sprintf("http://%s.%s.svc.cluster.local", pipeline.Name, pipeline.Namespace)
@@ -486,8 +494,36 @@ func (r *PipelineReconciler) invokePipeline(ctx context.Context, pipeline *cloth
 	}
 	defer resp.Body.Close()
 
+	// Read response body
+	body, _ := io.ReadAll(resp.Body)
+
 	if resp.StatusCode >= 400 {
+		log.Info("Pipeline returned error", "status", resp.StatusCode, "body", string(body))
 		return fmt.Errorf("pipeline returned HTTP %d", resp.StatusCode)
+	}
+
+	// Forward execution report to Control Plane API if present
+	if resp.Header.Get("X-Clotho-Execution") == "true" && len(body) > 0 {
+		apiURL := r.ControlPlaneURL
+		if apiURL == "" {
+			apiURL = os.Getenv("CLOTHO_CONTROL_PLANE_URL")
+		}
+		if apiURL != "" {
+			execURL := apiURL + "/v1/executions"
+			execReq, err := http.NewRequestWithContext(ctx, http.MethodPost, execURL, bytes.NewReader(body))
+			if err == nil {
+				execReq.Header.Set("Content-Type", "application/json")
+				execResp, err := httpClient.Do(execReq)
+				if err != nil {
+					log.Error(err, "Failed to forward execution report to API")
+				} else {
+					execResp.Body.Close()
+					log.Info("Forwarded execution report to API", "pipeline", pipeline.Name, "status", execResp.StatusCode)
+				}
+			}
+		} else {
+			log.Info("Execution report available but no Control Plane URL configured", "pipeline", pipeline.Name)
+		}
 	}
 
 	return nil

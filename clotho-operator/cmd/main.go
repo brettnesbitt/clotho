@@ -168,9 +168,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	controlPlaneURL := os.Getenv("CLOTHO_CONTROL_PLANE_URL")
+	if controlPlaneURL == "" {
+		controlPlaneURL = "http://clotho-api.clotho-control.svc.cluster.local:3000"
+	}
+
 	if err := (&controller.PipelineReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:          mgr.GetClient(),
+		Scheme:          mgr.GetScheme(),
+		ControlPlaneURL: controlPlaneURL,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "Pipeline")
 		os.Exit(1)
