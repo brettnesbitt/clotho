@@ -8,6 +8,17 @@ use std::pin::Pin;
 // The Error now hands ownership of the Context back to the engine!
 type AsyncTransformFn<T> = Box<dyn Fn(Context<T>) -> Pin<Box<dyn Future<Output = Result<Context<T>, (anyhow::Error, Context<T>)>> + Send>> + Send + Sync>;
 
+/// Sentinel error for .filter() soft drops. The engine recognizes this via downcast
+/// and silently discards the record instead of routing it to the DLQ.
+#[derive(Debug)]
+pub struct FilterDrop;
+impl std::fmt::Display for FilterDrop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "filtered")
+    }
+}
+impl std::error::Error for FilterDrop {}
+
 pub struct StreamPipeline<S, T> {
     source: S,
     transforms: Vec<AsyncTransformFn<T>>,
@@ -44,6 +55,26 @@ where
         self
     }
 
+    /// Synchronous Filter (Business Logic Drops)
+    /// Returns true to keep the record, false to silently drop it.
+    /// Dropped records are NOT routed to the DLQ — they are "soft drops"
+    /// that increment a separate `records_filtered` counter.
+    pub fn filter<F>(mut self, predicate: F) -> Self
+    where F: Fn(&T) -> bool + Send + Sync + 'static
+    {
+        self.transforms.push(Box::new(move |ctx: Context<T>| {
+            let keep = predicate(&ctx.data);
+            Box::pin(async move {
+                if keep {
+                    Ok(ctx)
+                } else {
+                    Err((anyhow::Error::new(FilterDrop), ctx))
+                }
+            })
+        }));
+        self
+    }
+
     /// Asynchronous Transform (I/O Bound - DB Lookups, API calls)
     pub fn map_async<F, Fut>(mut self, op: F) -> Self 
     where 
@@ -67,6 +98,7 @@ where
 
         telemetry::mark_birth();
         let boot_ms = telemetry::uptime_ms();
+        let start_time = std::time::Instant::now();
 
         eprintln!("[Clotho] Pipeline Started: {}", pipeline_id);
         eprintln!("[Clotho] Mode: Stream (item-by-item, zero-copy)");
@@ -75,6 +107,7 @@ where
         let mut records_in: u64 = 0;
         let mut records_out: u64 = 0;
         let mut records_failed: u64 = 0;
+        let mut records_filtered: u64 = 0;
         let mut bytes_processed: u64 = 0;
         let mut batch_counter: u64 = 0;
         let mut first_record = true;
@@ -89,6 +122,12 @@ where
                 Ok(initial_ctx) => {
                     records_in += 1;
                     
+                    // Estimate bytes processed by serializing the payload
+                    // This gives us a rough measure of data volume flowing through
+                    if let Ok(json) = serde_json::to_string(&initial_ctx.data) {
+                        bytes_processed += json.len() as u64;
+                    }
+                    
                     let trace_id = initial_ctx.span_id.clone();
                     
                     // We wrap the context in an Option so we can safely take() ownership
@@ -102,22 +141,32 @@ where
                         match op(ctx_to_process).await {
                             Ok(new_ctx) => current = Some(new_ctx),
                             Err((e, failed_ctx)) => {
-                                // We got the context back from the failed transform!
-                                records_failed += 1;
-                                let error_msg = e.to_string();
-                                eprintln!("[Clotho] Transform failed: {} (record routed to DLQ)", error_msg);
-                                
-                                // Serialize ONLY on the sad path! 
-                                let payload_str = serde_json::to_string(&failed_ctx.data)
-                                    .unwrap_or_else(|_| "Serialization failed".to_string());
-                                
-                                crate::telemetry::emit_dlq_record(
-                                    &pipeline_id,
-                                    &trace_id,
-                                    "transform",
-                                    &error_msg,
-                                    &payload_str,
-                                );
+                                // Check if this is a soft drop from .filter()
+                                if e.downcast_ref::<FilterDrop>().is_some() {
+                                    records_filtered += 1;
+                                    if records_filtered <= 3 || records_filtered % 10000 == 0 {
+                                        eprintln!("[Clotho] Record filtered (soft drop) [total filtered: {}]", records_filtered);
+                                    }
+                                } else {
+                                    // Hard fail — route to DLQ
+                                    records_failed += 1;
+                                    let error_msg = e.to_string();
+                                    if records_failed <= 3 || records_failed % 1000 == 0 {
+                                        eprintln!("[Clotho] Transform failed: {} (record routed to DLQ) [total failed: {}]", error_msg, records_failed);
+                                    }
+                                    
+                                    // Serialize ONLY on the sad path! 
+                                    let payload_str = serde_json::to_string(&failed_ctx.data)
+                                        .unwrap_or_else(|_| "Serialization failed".to_string());
+                                    
+                                    crate::telemetry::emit_dlq_record(
+                                        &pipeline_id,
+                                        &trace_id,
+                                        "transform",
+                                        &error_msg,
+                                        &payload_str,
+                                    );
+                                }
                                 break; 
                             }
                         }
@@ -142,21 +191,25 @@ where
             // Emit throughput every 100 records
             batch_counter += 1;
             if batch_counter >= 100 {
-                eprintln!("[Clotho] Progress: {} in, {} out, {} failed", records_in, records_out, records_failed);
-                telemetry::emit_throughput(&pipeline_id, records_in, records_out, records_failed, bytes_processed);
+                eprintln!("[Clotho] Progress: {} in, {} out, {} failed, {} filtered", records_in, records_out, records_failed, records_filtered);
+                telemetry::emit_throughput(&pipeline_id, records_in, records_out, records_failed, records_filtered, bytes_processed);
                 batch_counter = 0;
             }
         }
 
         // Final flush
-        let runtime_ms = telemetry::uptime_ms() - boot_ms;
-        eprintln!("[Clotho] Pipeline End: {} records in, {} records out, {} failed ({}ms)", records_in, records_out, records_failed, runtime_ms);
-        telemetry::emit_throughput(&pipeline_id, records_in, records_out, records_failed, bytes_processed);
+        let elapsed = start_time.elapsed();
+        let runtime_micros = elapsed.as_micros() as u64;
+        let runtime_ms = (runtime_micros + 999) / 1000; // Round up to nearest ms, minimum 1ms
+        eprintln!("[Clotho] Pipeline End: {} in, {} out, {} failed, {} filtered ({}µs / {}ms)", 
+                  records_in, records_out, records_failed, records_filtered, runtime_micros, runtime_ms);
+        telemetry::emit_throughput(&pipeline_id, records_in, records_out, records_failed, records_filtered, bytes_processed);
         telemetry::emit_lifecycle_with_runtime(&pipeline_id, "FINISHED", None, None, Some(runtime_ms));
 
         // Store execution report for the macro to POST via HTTP
         telemetry::set_execution_report(crate::telemetry::ExecutionReport {
             pipeline_id: pipeline_id.clone(),
+            mode: "stream".into(),
             started_at: String::new(),
             duration_ms: runtime_ms,
             status: "completed".into(),

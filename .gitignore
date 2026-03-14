@@ -1,5 +1,5 @@
-clotho-api
-clotho-ui
+.clotho-**
+!.clotho-stockseer/
 .local
 
 

@@ -1,0 +1,20 @@
+spin_manifest_version = 2
+
+[application]
+name = "news-crawler"
+version = "0.1.0"
+description = "RSS/Atom news feed crawler for Stockseer"
+
+[[trigger.http]]
+route = "/..."
+component = "news-crawler"
+
+[component.news-crawler]
+source = "target/wasm32-wasip1/release/news_crawler.wasm"
+allowed_outbound_hosts = [
+    "https://*:443",
+    "http://*:80",
+    "https://*:27017",
+]
+[component.news-crawler.build]
+command = "cargo build --target wasm32-wasip1 --release"

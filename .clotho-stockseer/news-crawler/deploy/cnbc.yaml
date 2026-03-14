@@ -1,0 +1,33 @@
+apiVersion: core.clotho.run/v1alpha1
+kind: Pipeline
+metadata:
+  name: crawler-cnbc
+  namespace: default
+spec:
+  runtime: "wasm"
+  mode: "once"
+  gitRepository: "https://github.com/brettnesbitt/clotho.git"
+  reference: "examples-and-infra"
+  path: ".clotho-stockseer/news-crawler"
+  config:
+    - name: CRAWLER_SOURCE
+      value: "CNBC"
+    - name: CRAWLER_FEEDS
+      value: '[{"url":"https://www.cnbc.com/id/100003114/device/rss/rss.html"},{"url":"https://www.cnbc.com/id/10001147/device/rss/rss.html"},{"url":"https://www.cnbc.com/id/15839135/device/rss/rss.html"},{"url":"https://www.cnbc.com/id/19854910/device/rss/rss.html"},{"url":"https://www.cnbc.com/id/15839069/device/rss/rss.html"}]'
+    - name: MONGO_URI
+      valueFrom:
+        secretKeyRef:
+          name: stockseer-secrets
+          key: mongo-uri
+    - name: MONGO_DB
+      value: "bluesky_db"
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "128Mi"
+  schedule:
+    mode: "interval"
+    interval: "1h"

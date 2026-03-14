@@ -1,11 +1,18 @@
-use crate::traits::{Source, Sink, LookupTarget, Context};
-use anyhow::{Context as AnyhowContext, Result};
+use crate::traits::{Sink, Context};
+#[cfg(feature = "native")]
+use crate::traits::Source;
+#[cfg(feature = "batch")]
+use crate::traits::LookupTarget;
+use anyhow::Result;
 use async_trait::async_trait;
 use mongodb::{options::ClientOptions, Client, Collection};
+#[cfg(feature = "native")]
 use mongodb::change_stream::event::ChangeStreamEvent;
-use bson::{doc, Document};
-use futures::stream::StreamExt;
-use std::sync::Arc;
+use bson::Document;
+#[cfg(feature = "native")]
+use futures_util::StreamExt;
+#[cfg(feature = "native")]
+use tokio::sync::Mutex;
 
 #[cfg(feature = "batch")]
 use polars::prelude::*;
@@ -92,12 +99,15 @@ impl LookupTarget for MongoLookup {
 }
 
 /// 2. THE MONGO SOURCE (Aggregation & CDC)
+/// Requires `native` feature (tokio Mutex for CDC streams)
+#[cfg(feature = "native")]
 pub struct MongoSource {
     collection: Collection<Document>,
     pipeline: Vec<Document>,
-    cdc_stream: Option<mongodb::change_stream::ChangeStream<ChangeStreamEvent<Document>>>,
+    cdc_stream: Option<Mutex<mongodb::change_stream::ChangeStream<ChangeStreamEvent<Document>>>>,
 }
 
+#[cfg(feature = "native")]
 impl MongoSource {
     pub async fn new(uri: &str, db: &str, coll: &str) -> Result<Self> {
         let client = Client::with_options(ClientOptions::parse(uri).await?)?;
@@ -117,23 +127,24 @@ impl MongoSource {
 
     /// Convert this source into a Real-Time Change Data Capture stream (for Stream mode)
     pub async fn watch(mut self) -> Result<Self> {
-        // You can pass self.pipeline here if you want to filter the CDC events natively!
         let stream = self.collection.watch(self.pipeline.clone(), None).await?;
-        self.cdc_stream = Some(stream);
+        self.cdc_stream = Some(Mutex::new(stream));
         Ok(self)
     }
 }
 
 // STREAM ENGINE: Yields CDC Events one by one
+#[cfg(feature = "native")]
 #[async_trait]
 impl Source<serde_json::Value> for MongoSource {
     async fn next(&mut self) -> Option<Result<Context<serde_json::Value>>> {
-        if let Some(stream) = &mut self.cdc_stream {
+        if let Some(stream_mutex) = &self.cdc_stream {
+            let mut stream = stream_mutex.lock().await;
             match stream.next().await {
                 Some(Ok(event)) => {
-                    let json_event: serde_json::Value = bson::to_document(&event).unwrap_or_default().into();
+                    let json_event: serde_json::Value = bson::Bson::Document(bson::to_document(&event).unwrap_or_default()).into();
                     let trace_id = uuid::Uuid::new_v4().to_string();
-                    Some(Ok(Context::root(json_event, trace_id)))
+                    Some(Ok(Context::root(json_event, &trace_id)))
                 }
                 Some(Err(e)) => Some(Err(anyhow::anyhow!("Mongo CDC Error: {}", e))),
                 None => None,
@@ -190,12 +201,54 @@ impl MongoSink {
 }
 
 // STREAM ENGINE: Insert documents one by one
+// Duplicate key errors (code 11000) are treated as no-ops, enabling dedup via unique indexes.
 #[async_trait]
 impl Sink<serde_json::Value> for MongoSink {
     async fn write(&mut self, ctx: Context<serde_json::Value>) -> Result<()> {
         let doc = bson::to_document(&ctx.data)?;
-        self.collection.insert_one(doc, None).await?;
-        Ok(())
+        match self.collection.insert_one(doc, None).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                // Duplicate key error (code 11000) = dedup via unique index, not a failure
+                if let mongodb::error::ErrorKind::Write(
+                    mongodb::error::WriteFailure::WriteError(ref we)
+                ) = *e.kind {
+                    if we.code == 11000 {
+                        return Ok(());
+                    }
+                }
+                Err(e.into())
+            }
+        }
+    }
+}
+
+// ONCE ENGINE: Bulk insert a Vec of JSON documents (for Pipeline::once payloads)
+// Uses ordered:false so non-duplicates succeed even when some hit unique index conflicts.
+#[async_trait]
+impl Sink<Vec<serde_json::Value>> for MongoSink {
+    async fn write(&mut self, ctx: Context<Vec<serde_json::Value>>) -> Result<()> {
+        let docs: Vec<Document> = ctx.data.iter()
+            .filter_map(|v| bson::to_document(v).ok())
+            .collect();
+        if docs.is_empty() { return Ok(()); }
+
+        let opts = mongodb::options::InsertManyOptions::builder().ordered(false).build();
+        match self.collection.insert_many(docs, opts).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                // With ordered:false, non-dupes are still inserted.
+                // If all write errors are duplicate key (11000), treat as success.
+                if let mongodb::error::ErrorKind::BulkWrite(ref bwe) = *e.kind {
+                    if let Some(ref write_errors) = bwe.write_errors {
+                        if write_errors.iter().all(|we| we.code == 11000) {
+                            return Ok(());
+                        }
+                    }
+                }
+                Err(e.into())
+            }
+        }
     }
 }
 

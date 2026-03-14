@@ -1,0 +1,33 @@
+apiVersion: core.clotho.run/v1alpha1
+kind: Pipeline
+metadata:
+  name: crawler-investingcom
+  namespace: default
+spec:
+  runtime: "wasm"
+  mode: "once"
+  gitRepository: "https://github.com/brettnesbitt/clotho.git"
+  reference: "examples-and-infra"
+  path: ".clotho-stockseer/news-crawler"
+  config:
+    - name: CRAWLER_SOURCE
+      value: "Investing.com"
+    - name: CRAWLER_FEEDS
+      value: '[{"url":"https://www.investing.com/rss/news.rss"},{"url":"https://www.investing.com/rss/news_25.rss"},{"url":"https://www.investing.com/rss/news_49.rss"},{"url":"https://www.investing.com/rss/news_301.rss"}]'
+    - name: MONGO_URI
+      valueFrom:
+        secretKeyRef:
+          name: stockseer-secrets
+          key: mongo-uri
+    - name: MONGO_DB
+      value: "bluesky_db"
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "128Mi"
+  schedule:
+    mode: "interval"
+    interval: "50m"

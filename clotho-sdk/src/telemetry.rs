@@ -3,13 +3,24 @@ use std::net::UdpSocket;
 use std::sync::{OnceLock, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-const AGENT_ADDR: &str = "127.0.0.1:8125";
-const AGENT_HTTP_PORT: u16 = 8126;
+/// Agent address for UDP telemetry. Reads CLOTHO_AGENT_HOST env var (set by operator
+/// via Kubernetes downward API to the node's hostIP), falls back to 127.0.0.1 for local dev.
+fn agent_udp_addr() -> String {
+    let host = std::env::var("CLOTHO_AGENT_HOST").unwrap_or_else(|_| "127.0.0.1".into());
+    format!("{}:8125", host)
+}
+
+fn agent_http_base() -> String {
+    let host = std::env::var("CLOTHO_AGENT_HOST").unwrap_or_else(|_| "127.0.0.1".into());
+    format!("http://{}:8126", host)
+}
 
 /// Execution report collected by pipeline runners, read by the macro.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct ExecutionReport {
     pub pipeline_id: String,
+    #[serde(default)]
+    pub mode: String,
     #[serde(default)]
     pub started_at: String,
     pub duration_ms: u64,
@@ -122,7 +133,7 @@ pub fn emit_lifecycle_with_runtime(pipeline_id: &str, event: &str, boot_ms: Opti
 
     if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
         if let Ok(data) = serde_json::to_vec(&envelope) {
-            let _ = socket.send_to(&data, AGENT_ADDR);
+            let _ = socket.send_to(&data, &agent_udp_addr());
         }
     }
 }
@@ -145,6 +156,7 @@ struct ThroughputPayload {
     records_in: u64,
     records_out: u64,
     records_failed: u64,
+    records_filtered: u64,
     bytes_processed: u64,
     timestamp: u64,
 }
@@ -159,7 +171,7 @@ struct ThroughputEvent {
 
 /// Emit throughput metrics to the Clotho Agent.
 /// Called by the SDK pipeline loop to report records flowing through the pipeline.
-pub fn emit_throughput(pipeline_id: &str, records_in: u64, records_out: u64, records_failed: u64, bytes_processed: u64) {
+pub fn emit_throughput(pipeline_id: &str, records_in: u64, records_out: u64, records_failed: u64, records_filtered: u64, bytes_processed: u64) {
     let event = ThroughputEvent {
         event_type: "Throughput".to_string(),
         payload: ThroughputPayload {
@@ -167,6 +179,7 @@ pub fn emit_throughput(pipeline_id: &str, records_in: u64, records_out: u64, rec
             records_in,
             records_out,
             records_failed,
+            records_filtered,
             bytes_processed,
             timestamp: now_secs(),
         },
@@ -174,7 +187,7 @@ pub fn emit_throughput(pipeline_id: &str, records_in: u64, records_out: u64, rec
 
     if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
         if let Ok(data) = serde_json::to_vec(&event) {
-            let _ = socket.send_to(&data, AGENT_ADDR);
+            let _ = socket.send_to(&data, &agent_udp_addr());
         }
     }
 }
@@ -186,7 +199,7 @@ pub fn report_progress(pipeline_id: &str, current: u64, total: Option<u64>) {
         pipeline_id, current, total, uptime_ms()
     );
     // Also emit as throughput with records_out = current
-    emit_throughput(pipeline_id, current, current, 0, 0);
+    emit_throughput(pipeline_id, current, current, 0, 0, 0);
 }
 
 /// DLQ event payload
@@ -226,7 +239,7 @@ pub fn emit_dlq_record(pipeline_id: &str, trace_id: &str, step: &str, error: &st
 
     if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
         if let Ok(data) = serde_json::to_vec(&event) {
-            let _ = socket.send_to(&data, AGENT_ADDR);
+            let _ = socket.send_to(&data, &agent_udp_addr());
         }
     }
     // Silent fail — never crash the pipeline because the dashboard is down

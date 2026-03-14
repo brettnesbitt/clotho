@@ -1,5 +1,10 @@
 spin_manifest_version = 2
 
+# must be available in k8s env
+# i.e. MONGO_ENDPOINT in k8s secret and clotho pipeline config
+[variables]
+mongo_endpoint = { required = true }
+
 [application]
 name = "clotho-news-aggregator"
 version = "0.1.0"
@@ -11,4 +16,4 @@ component = "news-pipeline"
 
 [component.news-pipeline]
 source = "target/wasm32-wasip/release/news_aggregator.wasm"
-allowed_outbound_hosts = ["https://jsonplaceholder.typicode.com", "https://data.mongodb-api.com"]
+allowed_outbound_hosts = ["https://jsonplaceholder.typicode.com", "{{ mongo_endpoint }}"]

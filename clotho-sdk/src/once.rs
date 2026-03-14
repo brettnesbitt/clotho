@@ -64,6 +64,7 @@ where T: Send + Sync + 'static
     {
         let pipeline_id = std::env::var("CLOTHO_PIPELINE_ID").unwrap_or("webhook".into());
         let boot_ms = telemetry::uptime_ms();
+        let start_time = std::time::Instant::now();
 
         telemetry::emit_lifecycle(&pipeline_id, "STARTUP", Some(boot_ms), None);
 
@@ -105,11 +106,14 @@ where T: Send + Sync + 'static
             sink.write(ctx).await?;
         }
 
-        let runtime_ms = telemetry::uptime_ms() - boot_ms;
+        let elapsed = start_time.elapsed();
+        let runtime_micros = elapsed.as_micros() as u64;
+        let runtime_ms = (runtime_micros + 999) / 1000; // Round up to nearest ms, minimum 1ms
         telemetry::emit_lifecycle_with_runtime(&pipeline_id, "FINISHED", None, None, Some(runtime_ms));
 
         telemetry::set_execution_report(crate::telemetry::ExecutionReport {
             pipeline_id: pipeline_id.clone(),
+            mode: "once".into(),
             started_at: String::new(),
             duration_ms: runtime_ms,
             status: "completed".into(),

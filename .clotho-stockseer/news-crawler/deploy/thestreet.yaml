@@ -1,0 +1,33 @@
+apiVersion: core.clotho.run/v1alpha1
+kind: Pipeline
+metadata:
+  name: crawler-thestreet
+  namespace: default
+spec:
+  runtime: "wasm"
+  mode: "once"
+  gitRepository: "https://github.com/brettnesbitt/clotho.git"
+  reference: "examples-and-infra"
+  path: ".clotho-stockseer/news-crawler"
+  config:
+    - name: CRAWLER_SOURCE
+      value: "TheStreet"
+    - name: CRAWLER_FEEDS
+      value: '[{"url":"https://www.thestreet.com/.rss/feed/a386f542-9b65-4245-9e22-e3cfd33d7d34.xml"}]'
+    - name: MONGO_URI
+      valueFrom:
+        secretKeyRef:
+          name: stockseer-secrets
+          key: mongo-uri
+    - name: MONGO_DB
+      value: "bluesky_db"
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "128Mi"
+  schedule:
+    mode: "interval"
+    interval: "45m"
