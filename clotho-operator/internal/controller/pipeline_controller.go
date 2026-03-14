@@ -251,11 +251,12 @@ func (r *PipelineReconciler) reconcileBuild(ctx context.Context, pipeline *cloth
 	// -----------------------------------------------------------
 	// Tier 1: Batteries Included (Internal Registry)
 	// Builder compiles from Git and pushes to the in-cluster registry.
+	// Each build uses a unique timestamp-based tag so containerd
+	// always pulls the fresh OCI artifact (no stale cache).
 	// -----------------------------------------------------------
-	targetImage := fmt.Sprintf("%s/%s:%s", internalRegistry, pipeline.Name, pipeline.Spec.Reference)
 
-	// Skip if image is already set (build already completed)
-	if pipeline.Spec.Image == targetImage {
+	// If image is already set, build was completed — skip
+	if pipeline.Spec.Image != "" {
 		return ctrl.Result{}, nil
 	}
 
@@ -266,6 +267,12 @@ func (r *PipelineReconciler) reconcileBuild(ctx context.Context, pipeline *cloth
 
 	if err == nil {
 		if existingJob.Status.Succeeded > 0 {
+			// Read the target image from the job annotation
+			targetImage := existingJob.Annotations["clotho.run/target-image"]
+			if targetImage == "" {
+				// Fallback for jobs created before this change
+				targetImage = fmt.Sprintf("%s/%s:%s", internalRegistry, pipeline.Name, pipeline.Spec.Reference)
+			}
 			log.Info("Build job completed, updating image", "image", targetImage)
 			pipeline.Spec.Image = targetImage
 			return ctrl.Result{}, r.Update(ctx, pipeline)
@@ -282,12 +289,20 @@ func (r *PipelineReconciler) reconcileBuild(ctx context.Context, pipeline *cloth
 		return ctrl.Result{}, err
 	}
 
+	// Generate a unique tag: <reference>-<unix-timestamp>
+	// This ensures containerd pulls a fresh artifact on every build.
+	tag := fmt.Sprintf("%s-%d", pipeline.Spec.Reference, time.Now().Unix())
+	targetImage := fmt.Sprintf("%s/%s:%s", internalRegistry, pipeline.Name, tag)
+
 	// Create the Build Job
 	log.Info("Creating build job", "job", jobName, "targetImage", targetImage)
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
 			Namespace: pipeline.Namespace,
+			Annotations: map[string]string{
+				"clotho.run/target-image": targetImage,
+			},
 		},
 		Spec: batchv1.JobSpec{
 			TTLSecondsAfterFinished: int32Ptr(600),
