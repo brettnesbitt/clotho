@@ -2,6 +2,24 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use std::collections::HashMap;
 
+// contract for data quality checks 
+#[derive(Clone)]
+pub enum ContractStatus {
+    Pass,
+    Warning(String),
+    Fail,
+}
+
+// users define how to receive data
+#[derive(Clone)]
+pub enum DataFormat {
+    /// Yields a single column "raw_bytes"
+    RawBytes,
+    /// Automatically parses JSON into a fully columnar DataFrame with inferred schema
+    Json,
+}
+
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provenance {
     pub trace_id: String,

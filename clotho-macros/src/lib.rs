@@ -24,32 +24,12 @@ pub fn main(_args: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// Helper: generates the execution report POST logic used by both entrypoints.
-/// Posts directly to CLOTHO_API_URL/v1/executions (Control Plane API).
-/// Falls back to agent at 127.0.0.1:8126 if CLOTHO_API_URL is not set.
-fn report_post_block() -> proc_macro2::TokenStream {
-    quote! {
-        if let Some(report_json) = ::clotho::telemetry::execution_report_json() {
-            let exec_url = match std::env::var("CLOTHO_API_URL") {
-                Ok(base) => format!("{}/v1/executions", base.trim_end_matches('/')),
-                Err(_) => "http://127.0.0.1:8126/v1/execution".to_string(),
-            };
-            let req = spin_sdk::http::Request::builder()
-                .method(spin_sdk::http::Method::Post)
-                .uri(&exec_url)
-                .header("content-type", "application/json")
-                .body(report_json)
-                .build();
-            let _: Result<spin_sdk::http::Response, _> = spin_sdk::http::send(req).await;
-        }
-    }
-}
-
 /// Generates a Spin HTTP component wrapper for pipeline-style (main) functions.
-/// The pipeline runs on each HTTP request and returns results as the response body.
+/// The execution report is returned as JSON in the response body so the operator
+/// can parse it and forward to the Control Plane API. This avoids WASM outbound
+/// networking issues entirely.
 fn impl_daemon_entrypoint(input_fn: ItemFn) -> TokenStream {
     let body = &input_fn.block;
-    let post_report = report_post_block();
 
     let expanded = quote! {
         #[spin_sdk::http_component]
@@ -66,16 +46,20 @@ fn impl_daemon_entrypoint(input_fn: ItemFn) -> TokenStream {
             let result: anyhow::Result<()> = async { #body }.await;
             let duration = start.elapsed().as_millis() as u64;
 
-            // C. POST execution report to Control Plane API (or agent as fallback)
-            #post_report
-
-            // D. Build HTTP Response
+            // C. Build response with execution report in body
+            // The operator parses this JSON and forwards to the Control Plane API.
             match &result {
                 Ok(_) => {
+                    let report_json = ::clotho::telemetry::execution_report_json()
+                        .unwrap_or_else(|| format!(
+                            r#"{{"pipeline_id":"{}","duration_ms":{},"status":"completed","records_in":0,"records_out":0,"records_failed":0,"bytes_processed":0,"log_lines":[]}}"#,
+                            pipeline_id, duration
+                        ).into_bytes());
                     Ok(spin_sdk::http::Response::builder()
                         .status(200)
-                        .header("content-type", "text/plain")
-                        .body(format!("Pipeline completed in {}ms", duration))
+                        .header("content-type", "application/json")
+                        .header("x-clotho-execution", "true")
+                        .body(report_json)
                         .build())
                 },
                 Err(e) => {
@@ -87,12 +71,16 @@ fn impl_daemon_entrypoint(input_fn: ItemFn) -> TokenStream {
                         log_lines: vec![e.to_string()],
                         ..Default::default()
                     });
-                    // Try to POST the failure report too
-                    #post_report
+                    let report_json = ::clotho::telemetry::execution_report_json()
+                        .unwrap_or_else(|| format!(
+                            r#"{{"pipeline_id":"{}","duration_ms":{},"status":"failed","records_in":0,"records_out":0,"records_failed":0,"bytes_processed":0,"log_lines":["{}"]}}"#,
+                            pipeline_id, duration, e
+                        ).into_bytes());
                     Ok(spin_sdk::http::Response::builder()
                         .status(500)
-                        .header("content-type", "text/plain")
-                        .body(format!("Pipeline failed: {}", e))
+                        .header("content-type", "application/json")
+                        .header("x-clotho-execution", "true")
+                        .body(report_json)
                         .build())
                 }
             }
@@ -106,7 +94,6 @@ fn impl_daemon_entrypoint(input_fn: ItemFn) -> TokenStream {
 fn impl_webhook_entrypoint(input_fn: ItemFn) -> TokenStream {
     let body = &input_fn.block;
     let inputs = &input_fn.sig.inputs;
-    let post_report = report_post_block();
 
     let expanded = quote! {
         #[spin_sdk::http_component]
@@ -119,9 +106,6 @@ fn impl_webhook_entrypoint(input_fn: ItemFn) -> TokenStream {
             let start = std::time::Instant::now();
             let result = async { #body }.await;
             let duration = start.elapsed().as_millis() as u64;
-
-            // C. POST execution report to Control Plane API (or agent as fallback)
-            #post_report
 
             result
         }
