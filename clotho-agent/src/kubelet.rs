@@ -59,10 +59,15 @@ impl KubeletClient {
         let resp = self.client.get(&url)
             .header("Authorization", format!("Bearer {}", self.token))
             .send()
-            .await?
-            .json::<Summary>()
             .await?;
-            
-        Ok(resp)
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("kubelet returned {} — {}", status, &body[..body.len().min(200)]);
+        }
+
+        let summary = resp.json::<Summary>().await?;
+        Ok(summary)
     }
 }

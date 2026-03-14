@@ -1,0 +1,14 @@
+apiVersion: v2
+name: clotho
+description: "Clotho Data Plane - Open-source Kubernetes operator + agent for WASM data pipelines"
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - data-pipelines
+  - wasm
+  - spin
+  - kubernetes
+  - open-source
+maintainers:
+  - name: Brett Nesbitt

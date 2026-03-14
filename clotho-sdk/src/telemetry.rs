@@ -1,9 +1,48 @@
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 use std::net::UdpSocket;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const AGENT_ADDR: &str = "127.0.0.1:8125";
+const AGENT_HTTP_PORT: u16 = 8126;
+
+/// Execution report collected by pipeline runners, read by the macro.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct ExecutionReport {
+    pub pipeline_id: String,
+    #[serde(default)]
+    pub started_at: String,
+    pub duration_ms: u64,
+    pub status: String,
+    pub records_in: u64,
+    pub records_out: u64,
+    pub records_failed: u64,
+    pub bytes_processed: u64,
+    pub log_lines: Vec<String>,
+}
+
+static EXECUTION_REPORT: OnceLock<Mutex<Option<ExecutionReport>>> = OnceLock::new();
+
+fn report_lock() -> &'static Mutex<Option<ExecutionReport>> {
+    EXECUTION_REPORT.get_or_init(|| Mutex::new(None))
+}
+
+/// Called by pipeline runners (stream, once, batch) at the end of execution.
+pub fn set_execution_report(report: ExecutionReport) {
+    if let Ok(mut guard) = report_lock().lock() {
+        *guard = Some(report);
+    }
+}
+
+/// Called by the macro-generated code to retrieve the report.
+pub fn take_execution_report() -> Option<ExecutionReport> {
+    report_lock().lock().ok().and_then(|mut guard| guard.take())
+}
+
+/// Serialize the execution report as JSON bytes (for HTTP POST).
+pub fn execution_report_json() -> Option<Vec<u8>> {
+    take_execution_report().and_then(|r| serde_json::to_vec(&r).ok())
+}
 
 // 1. The Global Stopwatch
 // initialized the first time ANY code in the SDK is touched.

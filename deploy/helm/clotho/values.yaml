@@ -1,0 +1,42 @@
+# Clotho Data Plane Helm Values
+# This chart installs the open-source data plane components into YOUR cluster.
+# The control plane (UI + API + telemetry DB) is hosted by Clotho at controlPlaneUrl.
+
+# -- Namespace for data plane components (operator + agent)
+namespace: clotho-system
+
+# -- Control Plane URL (Clotho's hosted API)
+# For SaaS: https://api.clotho.io
+# For local dev: http://clotho-api.clotho-control.svc.cluster.local:3000
+# For Enterprise (air-gapped): http://clotho-api.<your-control-ns>.svc.cluster.local:3000
+controlPlaneUrl: "https://api.clotho.io"
+
+# -- Container Registry
+registry: us-central1-docker.pkg.dev/quotopia-391900/clotho
+
+# -- Clotho Agent (DaemonSet - stateless telemetry broker)
+agent:
+  image: clotho-agent
+  tag: latest
+  ports:
+    udp: 8125
+    http: 8126
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
+# -- Authentication (Phone Home tunnel)
+# Set auth.apiKey to connect this cluster to the Clotho Control Plane.
+# Generate a key at app.clotho.io or via POST /v1/api-keys.
+auth: {}
+  # apiKey: "cl_opt_..."
+
+# -- Clotho Operator (CRDs + controller-manager)
+# The operator is deployed via kubebuilder's make deploy.
+# Set installCRDs to true if you want the chart to also install CRDs.
+operator:
+  installCRDs: false
