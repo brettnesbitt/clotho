@@ -1,0 +1,23 @@
+[package]
+name = "news-aggregator"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Point locally to your newly built SDK
+clotho = { path = "../../" } 
+
+# The Wasm runtime SDK
+spin-sdk = "3.0" 
+
+# Polars with the exact C++ features we need for our NDJSON memory tricks
+polars = { version = "0.41", features = ["lazy", "json", "ndjson", "strings"] }
+
+# Serialization and Database Drivers
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bson = "2.11"
+anyhow = "1.0"
+
+[workspace]
+# Keeps this example isolated from the main SDK workspace if needed

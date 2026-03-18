@@ -1,0 +1,28 @@
+[package]
+name = "news-crawler"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+clotho = { package = "clotho-sdk", path = "../../clotho-sdk" }
+spin-sdk = "3.0"
+anyhow = "1.0"
+
+# HTTP client
+reqwest = { version = "0.11", features = ["json"] }
+
+# RSS/Atom feed parsing
+feed-rs = "2.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Time handling
+chrono = "0.4"
+
+[workspace]

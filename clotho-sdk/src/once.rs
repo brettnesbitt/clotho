@@ -113,6 +113,7 @@ where T: Send + Sync + 'static
 
         telemetry::set_execution_report(crate::telemetry::ExecutionReport {
             pipeline_id: pipeline_id.clone(),
+            mode: "once".into(),
             started_at: String::new(),
             duration_ms: runtime_ms,
             status: "completed".into(),

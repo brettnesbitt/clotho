@@ -1,0 +1,33 @@
+apiVersion: core.clotho.run/v1alpha1
+kind: Pipeline
+metadata:
+  name: crawler-investopedia
+  namespace: default
+spec:
+  runtime: "wasm"
+  mode: "once"
+  gitRepository: "https://github.com/brettnesbitt/clotho.git"
+  reference: "examples-and-infra"
+  path: ".clotho-stockseer/news-crawler"
+  config:
+    - name: CRAWLER_SOURCE
+      value: "Investopedia"
+    - name: CRAWLER_FEEDS
+      value: '[{"url":"https://feeds-api.dotdashmeredith.com/v1/rss/google/f8466ec3-5044-46bc-94b7-2df65f770eff"}]'
+    - name: MONGO_URI
+      valueFrom:
+        secretKeyRef:
+          name: stockseer-secrets
+          key: mongo-uri
+    - name: MONGO_DB
+      value: "bluesky_db"
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "128Mi"
+  schedule:
+    mode: "interval"
+    interval: "55m"

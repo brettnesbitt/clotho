@@ -8,7 +8,14 @@ pub mod connectors;
 pub mod builtins;
 pub mod once;
 
-// Re-export the #[clotho::main] proc-macro attribute
+// Native-only: daemon runtime support (shutdown signals, etc.)
+#[cfg(feature = "native")]
+pub mod daemon_support;
+
+// Re-export the semantic proc-macro attributes
+pub use clotho_macros::job;
+pub use clotho_macros::daemon;
+
 pub use clotho_macros::main;
 
 // Re-export native-only types when feature is enabled

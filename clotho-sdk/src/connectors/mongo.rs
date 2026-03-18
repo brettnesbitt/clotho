@@ -1,54 +1,282 @@
-use mongodb::{Client, bson::{doc, Document}};
+use crate::traits::{Sink, Context};
+#[cfg(feature = "native")]
+use crate::traits::Source;
+#[cfg(feature = "batch")]
 use crate::traits::LookupTarget;
+use anyhow::Result;
+use async_trait::async_trait;
+use mongodb::{options::ClientOptions, Client, Collection};
+#[cfg(feature = "native")]
+use mongodb::change_stream::event::ChangeStreamEvent;
+use bson::Document;
+#[cfg(feature = "native")]
+use futures_util::StreamExt;
+#[cfg(feature = "native")]
+use tokio::sync::Mutex;
 
+#[cfg(feature = "batch")]
+use polars::prelude::*;
+
+/// 1. THE ENRICHMENT LOOKUP TARGET
+#[derive(Clone)]
 pub struct MongoLookup {
-    collection: mongodb::Collection<Document>,
-    // The "Escape Hatch": A user-defined closure that builds the query
-    query_builder: Box<dyn Fn(Vec<&str>) -> Document + Send + Sync>,
+    collection: Collection<Document>,
+    lookup_field: String,
+    /// The user-defined aggregation pipeline to run AFTER the initial key match
+    base_pipeline: Vec<Document>,
 }
 
 impl MongoLookup {
-    /// The Simple Path (What we had before)
-    pub async fn new(uri: &str, db: &str, coll: &str, field: &str) -> anyhow::Result<Self> {
-        let field_name = field.to_string();
-        Self::with_query(uri, db, coll, move |keys| {
-            doc! { field_name.clone(): { "$in": keys } }
-        }).await
-    }
-
-    /// The Advanced Path (The Escape Hatch)
-    pub async fn with_query<F>(uri: &str, db: &str, coll: &str, builder: F) -> anyhow::Result<Self> 
-    where 
-        F: Fn(Vec<&str>) -> Document + Send + Sync + 'static 
-    {
-        let client = Client::with_uri_str(uri).await?;
-        let collection = client.database(db).collection(coll);
+    pub async fn new(uri: &str, db: &str, coll: &str, lookup_field: &str) -> Result<Self> {
+        let mut client_options = ClientOptions::parse(uri).await?;
+        client_options.app_name = Some("clotho-pipeline".to_string());
         
+        let client = Client::with_options(client_options)?;
+        let collection = client.database(db).collection::<Document>(coll);
+
         Ok(Self {
             collection,
-            query_builder: Box::new(builder),
+            lookup_field: lookup_field.to_string(),
+            base_pipeline: vec![],
         })
+    }
+
+    /// Attach a full MongoDB Aggregation Pipeline to the lookup.
+    pub fn with_pipeline(mut self, pipeline: Vec<Document>) -> Self {
+        self.base_pipeline = pipeline;
+        self
     }
 }
 
-#[async_trait::async_trait]
+#[cfg(feature = "batch")]
+#[async_trait]
 impl LookupTarget for MongoLookup {
-    async fn lookup_batch(&self, keys: Vec<&str>) -> anyhow::Result<DataFrame> {
-        // 1. Invoke the user's custom query builder
-        let custom_query = (self.query_builder)(keys);
+    async fn lookup_batch(&self, keys: Vec<&str>) -> Result<DataFrame> {
+        if keys.is_empty() {
+            return Ok(DataFrame::default());
+        }
+
+        // 1. Construct the Dynamic Aggregation Pipeline
+        // Prepend the $match stage to filter the cluster down to the incoming batch keys
+        let mut active_pipeline = vec![
+            doc! {
+                "$match": {
+                    &self.lookup_field: { "$in": keys }
+                }
+            }
+        ];
         
-        // 2. Execute the query
-        let mut cursor = self.collection.find(custom_query, None).await?;
+        // Append the user's custom aggregation stages ($unwind, $project, etc.)
+        active_pipeline.extend(self.base_pipeline.clone());
+
+        // 2. Execute the Aggregation
+        let mut cursor = self.collection.aggregate(active_pipeline, None).await?;
         
-        // 3. Convert to Polars DataFrame (Hidden from user)
-        let mut results = Vec::new();
-        while let Some(doc) = cursor.next().await {
-            if let Ok(d) = doc {
-                // In a real implementation, we'd dynamically parse the BSON types to Arrow arrays
-                results.push(d); 
+        let mut buffer = Vec::with_capacity(keys.len() * 256);
+
+        // 3. High-Speed Conversion: BSON -> JSON -> NDJSON Buffer
+        while let Some(result) = cursor.next().await {
+            let doc = result.context("Failed to read Mongo document")?;
+            
+            // Convert BSON Document to serde_json::Value to utilize Polars JSON parser
+            let json: serde_json::Value = doc.into();
+            serde_json::to_writer(&mut buffer, &json)?;
+            buffer.push(b'\n'); // Newline delimiter
+        }
+
+        if buffer.is_empty() {
+            return Ok(DataFrame::default());
+        }
+
+        let io_cursor = std::io::Cursor::new(buffer);
+        let df = polars::io::ndjson::JsonLineReader::new(io_cursor)
+            .infer_schema_len(Some(100))
+            .finish()
+            .context("Failed to parse Mongo results into Polars DataFrame")?;
+
+        Ok(df)
+    }
+}
+
+/// 2. THE MONGO SOURCE (Aggregation & CDC)
+/// Requires `native` feature (tokio Mutex for CDC streams)
+#[cfg(feature = "native")]
+pub struct MongoSource {
+    collection: Collection<Document>,
+    pipeline: Vec<Document>,
+    cdc_stream: Option<Mutex<mongodb::change_stream::ChangeStream<ChangeStreamEvent<Document>>>>,
+}
+
+#[cfg(feature = "native")]
+impl MongoSource {
+    pub async fn new(uri: &str, db: &str, coll: &str) -> Result<Self> {
+        let client = Client::with_options(ClientOptions::parse(uri).await?)?;
+        let collection = client.database(db).collection::<Document>(coll);
+        Ok(Self { 
+            collection, 
+            pipeline: vec![],
+            cdc_stream: None,
+        })
+    }
+
+    /// Supply an aggregation pipeline to run on the collection (for Batch mode)
+    pub fn aggregate(mut self, pipeline: Vec<Document>) -> Self {
+        self.pipeline = pipeline;
+        self
+    }
+
+    /// Convert this source into a Real-Time Change Data Capture stream (for Stream mode)
+    pub async fn watch(mut self) -> Result<Self> {
+        let stream = self.collection.watch(self.pipeline.clone(), None).await?;
+        self.cdc_stream = Some(Mutex::new(stream));
+        Ok(self)
+    }
+}
+
+// STREAM ENGINE: Yields CDC Events one by one
+#[cfg(feature = "native")]
+#[async_trait]
+impl Source<serde_json::Value> for MongoSource {
+    async fn next(&mut self) -> Option<Result<Context<serde_json::Value>>> {
+        if let Some(stream_mutex) = &self.cdc_stream {
+            let mut stream = stream_mutex.lock().await;
+            match stream.next().await {
+                Some(Ok(event)) => {
+                    let json_event: serde_json::Value = bson::Bson::Document(bson::to_document(&event).unwrap_or_default()).into();
+                    let trace_id = uuid::Uuid::new_v4().to_string();
+                    Some(Ok(Context::root(json_event, &trace_id)))
+                }
+                Some(Err(e)) => Some(Err(anyhow::anyhow!("Mongo CDC Error: {}", e))),
+                None => None,
+            }
+        } else {
+            Some(Err(anyhow::anyhow!("MongoSource must call .watch() to be used as a Stream Source")))
+        }
+    }
+}
+
+// BATCH ENGINE: Execute the Aggregation Pipeline and return a DataFrame
+#[cfg(feature = "batch")]
+#[async_trait]
+impl Source<DataFrame> for MongoSource {
+    async fn next(&mut self) -> Option<Result<Context<DataFrame>>> {
+        let mut cursor = match self.collection.aggregate(self.pipeline.clone(), None).await {
+            Ok(c) => c,
+            Err(e) => return Some(Err(anyhow::anyhow!("Mongo Aggregate Error: {}", e))),
+        };
+
+        let mut buffer = Vec::new();
+        let mut count = 0;
+
+        while let Some(Ok(doc)) = cursor.next().await {
+            let json: serde_json::Value = doc.into();
+            let _ = serde_json::to_writer(&mut buffer, &json);
+            buffer.push(b'\n');
+            count += 1;
+            
+            if count >= 10_000 { break; } // Safe chunking
+        }
+
+        if count == 0 { return None; } 
+
+        let io_cursor = std::io::Cursor::new(buffer);
+        match polars::io::ndjson::JsonLineReader::new(io_cursor).finish() {
+            Ok(df) => Some(Ok(Context::root(df, "mongo_batch"))),
+            Err(e) => Some(Err(anyhow::anyhow!("Polars parsing error: {}", e))),
+        }
+    }
+}
+
+/// 3. THE MONGO SINK (Bulk Inserts)
+pub struct MongoSink {
+    collection: Collection<Document>,
+}
+
+impl MongoSink {
+    pub async fn new(uri: &str, db: &str, coll: &str) -> Result<Self> {
+        let client = Client::with_options(ClientOptions::parse(uri).await?)?;
+        let collection = client.database(db).collection::<Document>(coll);
+        Ok(Self { collection })
+    }
+}
+
+// STREAM ENGINE: Insert documents one by one
+// Duplicate key errors (code 11000) are treated as no-ops, enabling dedup via unique indexes.
+#[async_trait]
+impl Sink<serde_json::Value> for MongoSink {
+    async fn write(&mut self, ctx: Context<serde_json::Value>) -> Result<()> {
+        let doc = bson::to_document(&ctx.data)?;
+        match self.collection.insert_one(doc, None).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                // Duplicate key error (code 11000) = dedup via unique index, not a failure
+                if let mongodb::error::ErrorKind::Write(
+                    mongodb::error::WriteFailure::WriteError(ref we)
+                ) = *e.kind {
+                    if we.code == 11000 {
+                        return Ok(());
+                    }
+                }
+                Err(e.into())
             }
         }
-        
-        Ok(bson_docs_to_dataframe(results)?)
+    }
+}
+
+// ONCE ENGINE: Bulk insert a Vec of JSON documents (for Pipeline::once payloads)
+// Uses ordered:false so non-duplicates succeed even when some hit unique index conflicts.
+#[async_trait]
+impl Sink<Vec<serde_json::Value>> for MongoSink {
+    async fn write(&mut self, ctx: Context<Vec<serde_json::Value>>) -> Result<()> {
+        let docs: Vec<Document> = ctx.data.iter()
+            .filter_map(|v| bson::to_document(v).ok())
+            .collect();
+        if docs.is_empty() { return Ok(()); }
+
+        let opts = mongodb::options::InsertManyOptions::builder().ordered(false).build();
+        match self.collection.insert_many(docs, opts).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                // With ordered:false, non-dupes are still inserted.
+                // If all write errors are duplicate key (11000), treat as success.
+                if let mongodb::error::ErrorKind::BulkWrite(ref bwe) = *e.kind {
+                    if let Some(ref write_errors) = bwe.write_errors {
+                        if write_errors.iter().all(|we| we.code == 11000) {
+                            return Ok(());
+                        }
+                    }
+                }
+                Err(e.into())
+            }
+        }
+    }
+}
+
+// BATCH ENGINE: High-speed bulk inserts
+#[cfg(feature = "batch")]
+#[async_trait]
+impl Sink<DataFrame> for MongoSink {
+    async fn write(&mut self, mut ctx: Context<DataFrame>) -> Result<()> {
+        if ctx.data.height() == 0 { return Ok(()); }
+
+        let mut buffer = Vec::with_capacity(ctx.data.height() * 256);
+        polars::io::ndjson::JsonWriter::new(&mut buffer)
+            .finish(&mut ctx.data)?;
+
+        let mut docs_to_insert = Vec::with_capacity(ctx.data.height());
+        for line in buffer.split(|&b| b == b'\n') {
+            if line.is_empty() { continue; }
+            
+            let json_val: serde_json::Value = serde_json::from_slice(line)?;
+            if let Ok(doc) = bson::to_document(&json_val) {
+                docs_to_insert.push(doc);
+            }
+        }
+
+        if !docs_to_insert.is_empty() {
+            self.collection.insert_many(docs_to_insert, None).await?;
+        }
+
+        Ok(())
     }
 }
