@@ -349,8 +349,8 @@ async fn flush_to_api(state: &Arc<Mutex<AgentState>>) {
         
         // Find matching usage for this pipeline, convert to instantaneous-ish nanocores/bytes
         let stats = usage_events.iter().find(|u| u.pod_uid == pid).map(|u| ResourceStats {
-            cpu_nano: (u.cpu_core_seconds * 1_000_000_000.0) as i64,
-            mem_bytes: (u.mem_gb_seconds * 1_073_741_824.0) as i64,
+            cpu_nano: u.instant_cpu_nanocores as i64,
+            mem_bytes: u.instant_mem_bytes as i64,
         });
 
         if events.is_empty() && stats.is_none() { continue; }

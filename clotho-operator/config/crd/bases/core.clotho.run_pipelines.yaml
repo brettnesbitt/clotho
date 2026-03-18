@@ -15,6 +15,12 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
+    - jsonPath: .spec.runtime
+      name: Runtime
+      type: string
+    - jsonPath: .spec.mode
+      name: Mode
+      type: string
     - jsonPath: .status.phase
       name: Phase
       type: string
@@ -135,6 +141,21 @@ spec:
                   type: object
                   x-kubernetes-map-type: atomic
                 type: array
+              mode:
+                allOf:
+                - enum:
+                  - stream
+                  - once
+                  - batch
+                - enum:
+                  - stream
+                  - once
+                  - batch
+                default: stream
+                description: |-
+                  Mode is the execution model for this pipeline.
+                  Determines how telemetry is stored and displayed.
+                type: string
               path:
                 description: |-
                   Path is the subdirectory within the repository containing the pipeline code.
@@ -236,6 +257,18 @@ spec:
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
                 type: object
+              runtime:
+                allOf:
+                - enum:
+                  - wasm
+                  - native
+                - enum:
+                  - wasm
+                  - native
+                default: wasm
+                description: 'Runtime selects the execution target: "wasm" (SpinApp)
+                  or "native" (Deployment).'
+                type: string
               schedule:
                 description: |-
                   5. Schedule (The "When")
