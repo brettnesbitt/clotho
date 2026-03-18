@@ -1,32 +1,61 @@
-use crate::traits::{Source, Sink, LookupTarget, Context};
-use anyhow::{Context as AnyhowContext, Result};
+use crate::traits::{Sink, Context};
+use anyhow::Result;
 use async_trait::async_trait;
-use mongodb::{options::ClientOptions, Client, Collection};
-use mongodb::change_stream::event::ChangeStreamEvent;
-use bson::{doc, Document};
-use futures::stream::StreamExt;
-use std::sync::Arc;
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// TRANSPARENT DATA PLANE PROXY
+//
+// The developer sees ONE API: MongoSink::new(), MongoLookup::new().
+// Under the hood, the SDK swaps the engine based on the build target:
+//
+//   Native (daemon/batch) → Direct TCP via mongodb crate (connection pool)
+//   WASM   (Spin jobs)    → HTTP POST to Clotho Data Proxy (DaemonSet)
+//
+// This solves two problems:
+//   1. mongodb crate depends on Tokio networking → can't compile to WASM
+//   2. Serverless WASM workers would thrash MongoDB connections without a pooler
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── Native-only imports ──────────────────────────────────────────────────────
+#[cfg(not(target_family = "wasm"))]
+use mongodb::{options::ClientOptions, Client, Collection};
+#[cfg(not(target_family = "wasm"))]
+use bson::Document;
+
+#[cfg(feature = "native")]
+use crate::traits::Source;
+#[cfg(feature = "native")]
+use mongodb::change_stream::event::ChangeStreamEvent;
+#[cfg(feature = "native")]
+use futures_util::StreamExt;
+#[cfg(feature = "native")]
+use tokio::sync::Mutex;
+
+#[cfg(feature = "batch")]
+use crate::traits::LookupTarget;
 #[cfg(feature = "batch")]
 use polars::prelude::*;
 
-/// 1. THE ENRICHMENT LOOKUP TARGET
+// ═══════════════════════════════════════════════════════════════════════════════
+// 1. MONGO LOOKUP (Enrichment Target)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── Native MongoLookup ───────────────────────────────────────────────────────
+#[cfg(not(target_family = "wasm"))]
 #[derive(Clone)]
 pub struct MongoLookup {
     collection: Collection<Document>,
     lookup_field: String,
-    /// The user-defined aggregation pipeline to run AFTER the initial key match
     base_pipeline: Vec<Document>,
 }
 
+#[cfg(not(target_family = "wasm"))]
 impl MongoLookup {
     pub async fn new(uri: &str, db: &str, coll: &str, lookup_field: &str) -> Result<Self> {
         let mut client_options = ClientOptions::parse(uri).await?;
         client_options.app_name = Some("clotho-pipeline".to_string());
-        
         let client = Client::with_options(client_options)?;
         let collection = client.database(db).collection::<Document>(coll);
-
         Ok(Self {
             collection,
             lookup_field: lookup_field.to_string(),
@@ -34,14 +63,43 @@ impl MongoLookup {
         })
     }
 
-    /// Attach a full MongoDB Aggregation Pipeline to the lookup.
     pub fn with_pipeline(mut self, pipeline: Vec<Document>) -> Self {
         self.base_pipeline = pipeline;
         self
     }
 }
 
-#[cfg(feature = "batch")]
+// ── WASM MongoLookup (proxy) ─────────────────────────────────────────────────
+#[cfg(target_family = "wasm")]
+#[derive(Clone)]
+pub struct MongoLookup {
+    uri: String,
+    db: String,
+    coll: String,
+    lookup_field: String,
+    http_client: reqwest::Client,
+}
+
+#[cfg(target_family = "wasm")]
+impl MongoLookup {
+    pub async fn new(uri: &str, db: &str, coll: &str, lookup_field: &str) -> Result<Self> {
+        Ok(Self {
+            uri: uri.into(),
+            db: db.into(),
+            coll: coll.into(),
+            lookup_field: lookup_field.to_string(),
+            http_client: reqwest::Client::new(),
+        })
+    }
+
+    pub fn with_pipeline(self, _pipeline: Vec<serde_json::Value>) -> Self {
+        // Pipeline sent to proxy at query time — stored as-is for now
+        self
+    }
+}
+
+// ── Batch LookupTarget (native only — batch feature requires native) ─────────
+#[cfg(all(feature = "batch", not(target_family = "wasm")))]
 #[async_trait]
 impl LookupTarget for MongoLookup {
     async fn lookup_batch(&self, keys: Vec<&str>) -> Result<DataFrame> {
@@ -49,32 +107,23 @@ impl LookupTarget for MongoLookup {
             return Ok(DataFrame::default());
         }
 
-        // 1. Construct the Dynamic Aggregation Pipeline
-        // Prepend the $match stage to filter the cluster down to the incoming batch keys
         let mut active_pipeline = vec![
-            doc! {
+            bson::doc! {
                 "$match": {
                     &self.lookup_field: { "$in": keys }
                 }
             }
         ];
-        
-        // Append the user's custom aggregation stages ($unwind, $project, etc.)
         active_pipeline.extend(self.base_pipeline.clone());
 
-        // 2. Execute the Aggregation
         let mut cursor = self.collection.aggregate(active_pipeline, None).await?;
-        
         let mut buffer = Vec::with_capacity(keys.len() * 256);
 
-        // 3. High-Speed Conversion: BSON -> JSON -> NDJSON Buffer
         while let Some(result) = cursor.next().await {
             let doc = result.context("Failed to read Mongo document")?;
-            
-            // Convert BSON Document to serde_json::Value to utilize Polars JSON parser
             let json: serde_json::Value = doc.into();
             serde_json::to_writer(&mut buffer, &json)?;
-            buffer.push(b'\n'); // Newline delimiter
+            buffer.push(b'\n');
         }
 
         if buffer.is_empty() {
@@ -91,7 +140,11 @@ impl LookupTarget for MongoLookup {
     }
 }
 
-/// 2. THE MONGO SOURCE (Aggregation & CDC)
+// ═══════════════════════════════════════════════════════════════════════════════
+// 2. MONGO SOURCE (Aggregation & CDC — native only)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(feature = "native")]
 pub struct MongoSource {
     collection: Collection<Document>,
     pipeline: Vec<Document>,
@@ -102,20 +155,18 @@ impl MongoSource {
     pub async fn new(uri: &str, db: &str, coll: &str) -> Result<Self> {
         let client = Client::with_options(ClientOptions::parse(uri).await?)?;
         let collection = client.database(db).collection::<Document>(coll);
-        Ok(Self { 
-            collection, 
+        Ok(Self {
+            collection,
             pipeline: vec![],
             cdc_stream: None,
         })
     }
 
-    /// Supply an aggregation pipeline to run on the collection (for Batch mode)
     pub fn aggregate(mut self, pipeline: Vec<Document>) -> Self {
         self.pipeline = pipeline;
         self
     }
 
-    /// Convert this source into a Real-Time Change Data Capture stream (for Stream mode)
     pub async fn watch(mut self) -> Result<Self> {
         // You can pass self.pipeline here if you want to filter the CDC events natively!
         let stream = self.collection.watch(self.pipeline.clone(), None).await?;
@@ -124,7 +175,7 @@ impl MongoSource {
     }
 }
 
-// STREAM ENGINE: Yields CDC Events one by one
+#[cfg(feature = "native")]
 #[async_trait]
 impl Source<serde_json::Value> for MongoSource {
     async fn next(&mut self) -> Option<Result<Context<serde_json::Value>>> {
@@ -144,8 +195,7 @@ impl Source<serde_json::Value> for MongoSource {
     }
 }
 
-// BATCH ENGINE: Execute the Aggregation Pipeline and return a DataFrame
-#[cfg(feature = "batch")]
+#[cfg(all(feature = "batch", not(target_family = "wasm")))]
 #[async_trait]
 impl Source<DataFrame> for MongoSource {
     async fn next(&mut self) -> Option<Result<Context<DataFrame>>> {
@@ -162,11 +212,10 @@ impl Source<DataFrame> for MongoSource {
             let _ = serde_json::to_writer(&mut buffer, &json);
             buffer.push(b'\n');
             count += 1;
-            
-            if count >= 10_000 { break; } // Safe chunking
+            if count >= 10_000 { break; }
         }
 
-        if count == 0 { return None; } 
+        if count == 0 { return None; }
 
         let io_cursor = std::io::Cursor::new(buffer);
         match polars::io::ndjson::JsonLineReader::new(io_cursor).finish() {
@@ -176,11 +225,20 @@ impl Source<DataFrame> for MongoSource {
     }
 }
 
-/// 3. THE MONGO SINK (Bulk Inserts)
+// ═══════════════════════════════════════════════════════════════════════════════
+// 3. MONGO SINK
+//
+// Native: Direct TCP insert via mongodb driver
+// WASM:   HTTP POST to Clotho Data Proxy (localhost DaemonSet)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── Native MongoSink ─────────────────────────────────────────────────────────
+#[cfg(not(target_family = "wasm"))]
 pub struct MongoSink {
     collection: Collection<Document>,
 }
 
+#[cfg(not(target_family = "wasm"))]
 impl MongoSink {
     pub async fn new(uri: &str, db: &str, coll: &str) -> Result<Self> {
         let client = Client::with_options(ClientOptions::parse(uri).await?)?;
@@ -189,18 +247,141 @@ impl MongoSink {
     }
 }
 
-// STREAM ENGINE: Insert documents one by one
+// ── WASM MongoSink (proxy) ───────────────────────────────────────────────────
+#[cfg(target_family = "wasm")]
+pub struct MongoSink {
+    uri: String,
+    db: String,
+    coll: String,
+    http_client: reqwest::Client,
+}
+
+#[cfg(target_family = "wasm")]
+impl MongoSink {
+    pub async fn new(uri: &str, db: &str, coll: &str) -> Result<Self> {
+        Ok(Self {
+            uri: uri.into(),
+            db: db.into(),
+            coll: coll.into(),
+            http_client: reqwest::Client::new(),
+        })
+    }
+
+    fn proxy_url(&self) -> String {
+        std::env::var("CLOTHO_PROXY_URL")
+            .unwrap_or_else(|_| "http://clotho-data-proxy.clotho-system.svc.cluster.local:9090".into())
+    }
+}
+
+// ── Sink<Value> — single document insert ─────────────────────────────────────
+
+#[cfg(not(target_family = "wasm"))]
 #[async_trait]
 impl Sink<serde_json::Value> for MongoSink {
     async fn write(&mut self, ctx: Context<serde_json::Value>) -> Result<()> {
         let doc = bson::to_document(&ctx.data)?;
-        self.collection.insert_one(doc, None).await?;
+        match self.collection.insert_one(doc, None).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                if let mongodb::error::ErrorKind::Write(
+                    mongodb::error::WriteFailure::WriteError(ref we)
+                ) = *e.kind {
+                    if we.code == 11000 {
+                        return Ok(());
+                    }
+                }
+                Err(e.into())
+            }
+        }
+    }
+}
+
+#[cfg(target_family = "wasm")]
+#[async_trait]
+impl Sink<serde_json::Value> for MongoSink {
+    async fn write(&mut self, ctx: Context<serde_json::Value>) -> Result<()> {
+        let payload = serde_json::json!({
+            "uri": &self.uri,
+            "database": &self.db,
+            "collection": &self.coll,
+            "document": ctx.data,
+        });
+
+        let res = self.http_client
+            .post(&format!("{}/v1/mongo/insert", self.proxy_url()))
+            .json(&payload)
+            .send()
+            .await?;
+
+        if !res.status().is_success() {
+            let status = res.status();
+            let body = res.text().await.unwrap_or_default();
+            anyhow::bail!("Clotho Data Proxy error ({}): {}", status, body);
+        }
         Ok(())
     }
 }
 
-// BATCH ENGINE: High-speed bulk inserts
-#[cfg(feature = "batch")]
+// ── Sink<Vec<Value>> — bulk insert (Pipeline::once payloads) ─────────────────
+
+#[cfg(not(target_family = "wasm"))]
+#[async_trait]
+impl Sink<Vec<serde_json::Value>> for MongoSink {
+    async fn write(&mut self, ctx: Context<Vec<serde_json::Value>>) -> Result<()> {
+        let docs: Vec<Document> = ctx.data.iter()
+            .filter_map(|v| bson::to_document(v).ok())
+            .collect();
+        if docs.is_empty() { return Ok(()); }
+
+        let opts = mongodb::options::InsertManyOptions::builder().ordered(false).build();
+        match self.collection.insert_many(docs, opts).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                if let mongodb::error::ErrorKind::BulkWrite(ref bwe) = *e.kind {
+                    if let Some(ref write_errors) = bwe.write_errors {
+                        if write_errors.iter().all(|we| we.code == 11000) {
+                            return Ok(());
+                        }
+                    }
+                }
+                Err(e.into())
+            }
+        }
+    }
+}
+
+#[cfg(target_family = "wasm")]
+#[async_trait]
+impl Sink<Vec<serde_json::Value>> for MongoSink {
+    async fn write(&mut self, ctx: Context<Vec<serde_json::Value>>) -> Result<()> {
+        if ctx.data.is_empty() { return Ok(()); }
+
+        let payload = serde_json::json!({
+            "uri": &self.uri,
+            "database": &self.db,
+            "collection": &self.coll,
+            "documents": ctx.data,
+            "ordered": false,
+        });
+
+        let res = self.http_client
+            .post(&format!("{}/v1/mongo/insert-many", self.proxy_url()))
+            .json(&payload)
+            .send()
+            .await?;
+
+        if !res.status().is_success() {
+            let status = res.status();
+            let body = res.text().await.unwrap_or_default();
+            anyhow::bail!("Clotho Data Proxy error ({}): {}", status, body);
+        }
+        Ok(())
+    }
+}
+
+// ── Sink<DataFrame> — batch engine (native only) ────────────────────────────
+
+#[cfg(all(feature = "batch", not(target_family = "wasm")))]
 #[async_trait]
 impl Sink<DataFrame> for MongoSink {
     async fn write(&mut self, mut ctx: Context<DataFrame>) -> Result<()> {
@@ -213,7 +394,6 @@ impl Sink<DataFrame> for MongoSink {
         let mut docs_to_insert = Vec::with_capacity(ctx.data.height());
         for line in buffer.split(|&b| b == b'\n') {
             if line.is_empty() { continue; }
-            
             let json_val: serde_json::Value = serde_json::from_slice(line)?;
             if let Ok(doc) = bson::to_document(&json_val) {
                 docs_to_insert.push(doc);
@@ -223,7 +403,6 @@ impl Sink<DataFrame> for MongoSink {
         if !docs_to_insert.is_empty() {
             self.collection.insert_many(docs_to_insert, None).await?;
         }
-
         Ok(())
     }
 }

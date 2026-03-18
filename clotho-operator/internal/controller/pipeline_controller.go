@@ -3,6 +3,7 @@ package controller
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -22,6 +23,7 @@ import (
 	spinva1 "github.com/spinkube/spin-operator/api/v1alpha1"
 
 	// K8s & Meta
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -41,6 +43,7 @@ type PipelineReconciler struct {
 // +kubebuilder:rbac:groups=core.spinkube.dev,resources=spinapps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
 
 func (r *PipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -78,30 +81,14 @@ func (r *PipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, nil // Don't retry, user needs to fix the secret
 	}
 
-	// 3. Define the SpinApp
-	spinApp := r.constructSpinApp(&pipeline)
-
-	// 4. Set Owner Reference (Garbage Collection)
-	if err := ctrl.SetControllerReference(&pipeline, spinApp, r.Scheme); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// 5. Apply (Create or Update)
-	// We use server-side apply logic roughly here by checking existence
-	found := &spinva1.SpinApp{}
-	err := r.Get(ctx, types.NamespacedName{Name: spinApp.Name, Namespace: spinApp.Namespace}, found)
-	if err != nil && errors.IsNotFound(err) {
-		log.Info("Creating new SpinApp", "Namespace", spinApp.Namespace, "Name", spinApp.Name)
-		if err := r.Create(ctx, spinApp); err != nil {
+	// 3. Deploy based on Runtime
+	switch pipeline.Spec.Runtime {
+	case clothov1alpha1.PipelineRuntimeNative:
+		if err := r.reconcileNativeDeployment(ctx, &pipeline); err != nil {
 			return ctrl.Result{}, err
 		}
-	} else if err != nil {
-		return ctrl.Result{}, err
-	} else {
-		// Update Logic: Check if specs changed
-		// Note: detailed comparison omitted for brevity, usually we patch or update
-		found.Spec = spinApp.Spec
-		if err := r.Update(ctx, found); err != nil {
+	default: // wasm (default)
+		if err := r.reconcileSpinApp(ctx, &pipeline); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -220,11 +207,130 @@ func (r *PipelineReconciler) constructSpinApp(p *clothov1alpha1.Pipeline) *spinv
 	}
 }
 
+// reconcileSpinApp handles WASM pipelines by creating/updating a SpinApp
+func (r *PipelineReconciler) reconcileSpinApp(ctx context.Context, pipeline *clothov1alpha1.Pipeline) error {
+	log := log.FromContext(ctx)
+
+	spinApp := r.constructSpinApp(pipeline)
+	if err := ctrl.SetControllerReference(pipeline, spinApp, r.Scheme); err != nil {
+		return err
+	}
+
+	found := &spinva1.SpinApp{}
+	err := r.Get(ctx, types.NamespacedName{Name: spinApp.Name, Namespace: spinApp.Namespace}, found)
+	if err != nil && errors.IsNotFound(err) {
+		log.Info("Creating new SpinApp", "Namespace", spinApp.Namespace, "Name", spinApp.Name)
+		return r.Create(ctx, spinApp)
+	} else if err != nil {
+		return err
+	}
+
+	found.Spec = spinApp.Spec
+	return r.Update(ctx, found)
+}
+
+// reconcileNativeDeployment handles native pipelines by creating/updating a Deployment
+func (r *PipelineReconciler) reconcileNativeDeployment(ctx context.Context, pipeline *clothov1alpha1.Pipeline) error {
+	log := log.FromContext(ctx)
+
+	deploy := r.constructDeployment(pipeline)
+	if err := ctrl.SetControllerReference(pipeline, deploy, r.Scheme); err != nil {
+		return err
+	}
+
+	found := &appsv1.Deployment{}
+	err := r.Get(ctx, types.NamespacedName{Name: deploy.Name, Namespace: deploy.Namespace}, found)
+	if err != nil && errors.IsNotFound(err) {
+		log.Info("Creating native Deployment", "Namespace", deploy.Namespace, "Name", deploy.Name)
+		return r.Create(ctx, deploy)
+	} else if err != nil {
+		return err
+	}
+
+	// Update container image, env, and resources
+	found.Spec.Replicas = deploy.Spec.Replicas
+	found.Spec.Template = deploy.Spec.Template
+	return r.Update(ctx, found)
+}
+
+// constructDeployment maps Clotho Pipeline -> Kubernetes Deployment (native runtime)
+func (r *PipelineReconciler) constructDeployment(p *clothov1alpha1.Pipeline) *appsv1.Deployment {
+	labels := map[string]string{
+		"app":                 p.Name,
+		"clotho.run/pipeline": p.Name,
+		"clotho.run/mode":     string(p.Spec.Mode),
+		"clotho.run/runtime":  "native",
+		"managed-by":          "clotho",
+	}
+
+	envVars := []corev1.EnvVar{
+		{Name: "CLOTHO_PIPELINE_ID", Value: p.Name},
+		{Name: "CLOTHO_API_URL", Value: r.ControlPlaneURL},
+		{Name: "RUST_LOG", Value: "info"},
+		// Inject node IP so SDK telemetry (UDP) reaches the agent DaemonSet on hostNetwork
+		{
+			Name: "CLOTHO_AGENT_HOST",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "status.hostIP",
+				},
+			},
+		},
+	}
+
+	for _, cfg := range p.Spec.Config {
+		ev := corev1.EnvVar{Name: cfg.Name}
+		if cfg.Value != "" {
+			ev.Value = cfg.Value
+		}
+		if cfg.ValueFrom != nil && cfg.ValueFrom.SecretKeyRef != nil {
+			ev.ValueFrom = &corev1.EnvVarSource{
+				SecretKeyRef: cfg.ValueFrom.SecretKeyRef,
+			}
+		}
+		envVars = append(envVars, ev)
+	}
+
+	replicas := p.Spec.Replicas
+	if replicas == 0 {
+		replicas = 1
+	}
+
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      p.Name,
+			Namespace: p.Namespace,
+			Labels:    labels,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"app": p.Name},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:            "pipeline",
+						Image:           p.Spec.Image,
+						ImagePullPolicy: corev1.PullAlways,
+						Env:             envVars,
+						Resources:       p.Spec.Resources,
+					}},
+					ImagePullSecrets: p.Spec.ImagePullSecrets,
+					RestartPolicy:    corev1.RestartPolicyAlways,
+				},
+			},
+		},
+	}
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *PipelineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&clothov1alpha1.Pipeline{}).
 		Owns(&spinva1.SpinApp{}).
+		Owns(&appsv1.Deployment{}).
 		Owns(&batchv1.Job{}). // Watch builder jobs to detect completion
 		Complete(r)
 }
@@ -524,6 +630,20 @@ func (r *PipelineReconciler) invokePipeline(ctx context.Context, pipeline *cloth
 			apiURL = os.Getenv("CLOTHO_CONTROL_PLANE_URL")
 		}
 		if apiURL != "" {
+			// Inject pipeline mode from the CR spec into the report JSON.
+			// This ensures the API knows how to route storage even if the SDK omitted it.
+			mode := string(pipeline.Spec.Mode)
+			if mode == "" {
+				mode = "stream"
+			}
+			var report map[string]interface{}
+			if err := json.Unmarshal(body, &report); err == nil {
+				report["mode"] = mode
+				if enriched, err := json.Marshal(report); err == nil {
+					body = enriched
+				}
+			}
+
 			execURL := apiURL + "/v1/executions"
 			execReq, err := http.NewRequestWithContext(ctx, http.MethodPost, execURL, bytes.NewReader(body))
 			if err == nil {
@@ -533,7 +653,7 @@ func (r *PipelineReconciler) invokePipeline(ctx context.Context, pipeline *cloth
 					log.Error(err, "Failed to forward execution report to API")
 				} else {
 					execResp.Body.Close()
-					log.Info("Forwarded execution report to API", "pipeline", pipeline.Name, "status", execResp.StatusCode)
+					log.Info("Forwarded execution report to API", "pipeline", pipeline.Name, "mode", mode, "status", execResp.StatusCode)
 				}
 			}
 		} else {
