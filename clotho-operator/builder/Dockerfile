@@ -15,6 +15,13 @@ RUN curl -fsSL https://developer.fermyon.com/downloads/install.sh | bash && \
 # 3. Add Wasm Target
 RUN rustup target add wasm32-wasip1
 
+# 3.1. Install WASI SDK (needed by ring crate to compile C code for wasm32-wasip1)
+ENV WASI_VERSION=25
+ENV WASI_SDK_PATH=/opt/wasi-sdk
+RUN curl -fsSL https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_VERSION}/wasi-sdk-${WASI_VERSION}.0-x86_64-linux.tar.gz \
+    | tar xz -C /opt && mv /opt/wasi-sdk-${WASI_VERSION}.0-x86_64-linux ${WASI_SDK_PATH}
+ENV CC_wasm32_wasip1="${WASI_SDK_PATH}/bin/clang --sysroot=${WASI_SDK_PATH}/share/wasi-sysroot"
+
 # 3.5. Install CA certificate for internal registry (will be mounted at runtime)
 RUN mkdir -p /etc/docker/certs.d/clotho-registry.clotho-system.svc.cluster.local:5000
 
@@ -42,6 +49,10 @@ if [ -n "$GIT_TOKEN" ]; then\n\
   # Insert token into URL for private repos (use x-access-token for GitHub PATs)\n\
   AUTH_URL=$(echo $REPO_URL | sed "s|https://|https://x-access-token:$GIT_TOKEN@|")\n\
   git clone $AUTH_URL /app/source\n\
+  # Configure git credential store so Cargo git dependencies can authenticate too\n\
+  git config --global credential.helper store\n\
+  echo "https://x-access-token:$GIT_TOKEN@github.com" > ~/.git-credentials\n\
+  export CARGO_NET_GIT_FETCH_WITH_CLI=true\n\
 else\n\
   git clone $REPO_URL /app/source\n\
 fi\n\

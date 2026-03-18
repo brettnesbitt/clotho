@@ -4,9 +4,12 @@ use std::time::Instant;
 pub struct ResourceTracker {
     // Key: Pod UID
     last_seen: HashMap<String, Instant>,
-    // Accumulators
+    // Accumulators (billing)
     cpu_nanocore_seconds: HashMap<String, u128>, 
     mem_byte_seconds: HashMap<String, u128>,
+    // Instantaneous (dashboard)
+    last_cpu_nanocores: HashMap<String, u64>,
+    last_mem_bytes: HashMap<String, u64>,
 }
 
 impl ResourceTracker {
@@ -15,6 +18,8 @@ impl ResourceTracker {
             last_seen: HashMap::new(),
             cpu_nanocore_seconds: HashMap::new(),
             mem_byte_seconds: HashMap::new(),
+            last_cpu_nanocores: HashMap::new(),
+            last_mem_bytes: HashMap::new(),
         }
     }
 
@@ -33,6 +38,8 @@ impl ResourceTracker {
             *self.mem_byte_seconds.entry(pod_uid.to_string()).or_default() += mem_added;
         }
 
+        self.last_cpu_nanocores.insert(pod_uid.to_string(), cpu_nanocores);
+        self.last_mem_bytes.insert(pod_uid.to_string(), mem_bytes);
         self.last_seen.insert(pod_uid.to_string(), now);
     }
 
@@ -47,10 +54,14 @@ impl ResourceTracker {
             if let Some(cpu) = self.cpu_nanocore_seconds.remove(&uid) {
                 let mem = self.mem_byte_seconds.remove(&uid).unwrap_or(0);
                 
+                let instant_cpu = self.last_cpu_nanocores.get(&uid).copied().unwrap_or(0);
+                let instant_mem = self.last_mem_bytes.get(&uid).copied().unwrap_or(0);
                 events.push(ResourceUsageEvent {
                     pod_uid: uid,
                     cpu_core_seconds: cpu as f64 / 1_000_000_000.0, // Convert Nano -> Core
                     mem_gb_seconds: mem as f64 / 1_073_741_824.0,   // Convert Byte -> GB
+                    instant_cpu_nanocores: instant_cpu,
+                    instant_mem_bytes: instant_mem,
                 });
             }
         }
@@ -65,4 +76,6 @@ pub struct ResourceUsageEvent {
     pub pod_uid: String,
     pub cpu_core_seconds: f64,
     pub mem_gb_seconds: f64,
+    pub instant_cpu_nanocores: u64,
+    pub instant_mem_bytes: u64,
 }

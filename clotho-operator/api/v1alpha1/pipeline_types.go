@@ -5,8 +5,49 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// PipelineRuntime defines whether the pipeline runs as a WASM module (SpinApp) or a native container (Deployment).
+// +kubebuilder:validation:Enum=wasm;native
+type PipelineRuntime string
+
+const (
+	// PipelineRuntimeWasm runs the pipeline as a SpinApp via SpinKube.
+	PipelineRuntimeWasm PipelineRuntime = "wasm"
+
+	// PipelineRuntimeNative runs the pipeline as a standard Kubernetes Deployment.
+	PipelineRuntimeNative PipelineRuntime = "native"
+)
+
+// PipelineMode defines the execution model for a pipeline.
+// +kubebuilder:validation:Enum=stream;once;batch
+type PipelineMode string
+
+const (
+	// PipelineModeStream processes records continuously from a source (e.g. Kafka, MQTT).
+	// Telemetry: time-bucket aggregation, DLQ inbox, lifecycle log.
+	PipelineModeStream PipelineMode = "stream"
+
+	// PipelineModeOnce processes a single request/payload (webhook-style).
+	// Telemetry: discrete execution records with duration, status, logs.
+	PipelineModeOnce PipelineMode = "once"
+
+	// PipelineModeBatch processes a finite set of records in one run.
+	// Telemetry: discrete execution records with duration, records in/out, status.
+	PipelineModeBatch PipelineMode = "batch"
+)
+
 // PipelineSpec defines the desired state of Pipeline
 type PipelineSpec struct {
+	// Runtime selects the execution target: "wasm" (SpinApp) or "native" (Deployment).
+	// +kubebuilder:default:="wasm"
+	// +kubebuilder:validation:Enum=wasm;native
+	Runtime PipelineRuntime `json:"runtime,omitempty"`
+
+	// Mode is the execution model for this pipeline.
+	// Determines how telemetry is stored and displayed.
+	// +kubebuilder:default:="stream"
+	// +kubebuilder:validation:Enum=stream;once;batch
+	Mode PipelineMode `json:"mode,omitempty"`
+
 	// 1. Source Control (The "Code")
 	// If provided, the Clotho Builder will clone, compile, and push to the internal registry.
 	// If omitted and Image is provided, the builder is skipped entirely (Tier 2: BYOR).
@@ -138,6 +179,8 @@ type PipelineStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Runtime",type=string,JSONPath=`.spec.runtime`
+// +kubebuilder:printcolumn:name="Mode",type=string,JSONPath=`.spec.mode`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="URL",type=string,JSONPath=`.status.url`
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
