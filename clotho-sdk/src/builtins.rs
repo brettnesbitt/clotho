@@ -27,7 +27,8 @@ impl<T> VecSource<T> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
 impl<T: Send + Sync> Source<T> for VecSource<T> {
     async fn next(&mut self) -> Option<Result<Context<T>>> {
         // Wrap the raw item in a new Root Context
@@ -81,7 +82,8 @@ impl ConsoleSink {
     pub fn new() -> Self { Self }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
 impl<T: Debug + Send + Sync + 'static> Sink<T> for ConsoleSink {
     async fn write(&mut self, ctx: Context<T>) -> Result<()> {
         println!(
@@ -98,7 +100,8 @@ impl<T: Debug + Send + Sync + 'static> Sink<T> for ConsoleSink {
 /// Useful for performance testing or "Fire and Forget".
 pub struct DevNullSink;
 
-#[async_trait]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
 impl<T: Send + Sync + 'static> Sink<T> for DevNullSink {
     async fn write(&mut self, _ctx: Context<T>) -> Result<()> {
         // Do nothing. It vanishes into the void.
@@ -171,7 +174,8 @@ impl MockByteSource {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
 impl Source<Vec<u8>> for MockByteSource {
     async fn next(&mut self) -> Option<Result<Context<Vec<u8>>>> {
         if self.current >= self.data.len() {

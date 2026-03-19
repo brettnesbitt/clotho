@@ -151,6 +151,7 @@ pub struct MongoSource {
     cdc_stream: Option<mongodb::change_stream::ChangeStream<ChangeStreamEvent<Document>>>,
 }
 
+#[cfg(feature = "native")]
 impl MongoSource {
     pub async fn new(uri: &str, db: &str, coll: &str) -> Result<Self> {
         let client = Client::with_options(ClientOptions::parse(uri).await?)?;
