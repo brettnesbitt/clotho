@@ -297,7 +297,7 @@ impl Sink<serde_json::Value> for MongoSink {
 }
 
 #[cfg(target_family = "wasm")]
-#[async_trait]
+#[async_trait(?Send)]
 impl Sink<serde_json::Value> for MongoSink {
     async fn write(&mut self, ctx: Context<serde_json::Value>) -> Result<()> {
         let payload = serde_json::json!({
@@ -351,7 +351,7 @@ impl Sink<Vec<serde_json::Value>> for MongoSink {
 }
 
 #[cfg(target_family = "wasm")]
-#[async_trait]
+#[async_trait(?Send)]
 impl Sink<Vec<serde_json::Value>> for MongoSink {
     async fn write(&mut self, ctx: Context<Vec<serde_json::Value>>) -> Result<()> {
         if ctx.data.is_empty() { return Ok(()); }
