@@ -269,8 +269,7 @@ impl MongoSink {
     }
 
     fn proxy_url(&self) -> String {
-        std::env::var("CLOTHO_PROXY_URL")
-            .unwrap_or_else(|_| "http://clotho-data-proxy.clotho-system.svc.cluster.local:9090".into())
+        crate::config::var_or("CLOTHO_PROXY_URL", "http://clotho-data-proxy.clotho-system.svc.cluster.local:9090")
     }
 }
 
