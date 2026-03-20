@@ -25,8 +25,16 @@ pub fn var_or(name: &str, default: &str) -> String {
 fn var_inner(name: &str) -> Result<String, String> {
     // Spin variables are lowercase with underscores
     let spin_name = name.to_lowercase();
-    spin_sdk::variables::get(&spin_name)
-        .map_err(|e| format!("Spin variable '{}' not found: {}", spin_name, e))
+    match spin_sdk::variables::get(&spin_name) {
+        Ok(value) => Ok(value),
+        Err(spin_err) => std::env::var(name)
+            .map_err(|env_err| {
+                format!(
+                    "Spin variable '{}' not found ({}) and env var '{}' not found ({})",
+                    spin_name, spin_err, name, env_err
+                )
+            }),
+    }
 }
 
 #[cfg(not(target_family = "wasm"))]
