@@ -8,6 +8,7 @@ pub mod connectors;
 pub mod builtins;
 pub mod once;
 pub mod config;
+pub mod http;
 
 // Re-export the #[clotho::main] proc-macro attribute
 pub use clotho_macros::main;

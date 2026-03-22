@@ -77,7 +77,7 @@ pub struct MongoLookup {
     db: String,
     coll: String,
     lookup_field: String,
-    http_client: reqwest::Client,
+    http_client: crate::http::Client,
 }
 
 #[cfg(target_family = "wasm")]
@@ -88,7 +88,7 @@ impl MongoLookup {
             db: db.into(),
             coll: coll.into(),
             lookup_field: lookup_field.to_string(),
-            http_client: reqwest::Client::new(),
+            http_client: crate::http::Client::new(),
         })
     }
 
@@ -254,7 +254,7 @@ pub struct MongoSink {
     uri: String,
     db: String,
     coll: String,
-    http_client: reqwest::Client,
+    http_client: crate::http::Client,
 }
 
 #[cfg(target_family = "wasm")]
@@ -264,7 +264,7 @@ impl MongoSink {
             uri: uri.into(),
             db: db.into(),
             coll: coll.into(),
-            http_client: reqwest::Client::new(),
+            http_client: crate::http::Client::new(),
         })
     }
 
@@ -309,13 +309,13 @@ impl Sink<serde_json::Value> for MongoSink {
 
         let res = self.http_client
             .post(&format!("{}/v1/mongo/insert", self.proxy_url()))
-            .json(&payload)
+            .json(&payload)?
             .send()
             .await?;
 
-        if !res.status().is_success() {
+        if !res.is_success() {
             let status = res.status();
-            let body = res.text().await.unwrap_or_default();
+            let body = res.text().unwrap_or_default();
             anyhow::bail!("Clotho Data Proxy error ({}): {}", status, body);
         }
         Ok(())
@@ -366,13 +366,13 @@ impl Sink<Vec<serde_json::Value>> for MongoSink {
 
         let res = self.http_client
             .post(&format!("{}/v1/mongo/insert-many", self.proxy_url()))
-            .json(&payload)
+            .json(&payload)?
             .send()
             .await?;
 
-        if !res.status().is_success() {
+        if !res.is_success() {
             let status = res.status();
-            let body = res.text().await.unwrap_or_default();
+            let body = res.text().unwrap_or_default();
             anyhow::bail!("Clotho Data Proxy error ({}): {}", status, body);
         }
         Ok(())
