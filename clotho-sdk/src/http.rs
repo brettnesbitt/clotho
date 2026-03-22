@@ -110,30 +110,34 @@ impl<'a> RequestBuilder<'a> {
     pub async fn send(self) -> Result<Response> {
         #[cfg(target_family = "wasm")]
         {
-            use spin_sdk::http::{send, Request};
+            use spin_sdk::http::{send, Method as SpinMethod, Request, Response as SpinResponse};
 
-            let mut req_builder = Request::builder()
-                .method(self.method.as_str())
-                .uri(&self.url);
+            let mut req_builder = Request::builder();
+            let spin_method = match self.method {
+                Method::Get => SpinMethod::Get,
+                Method::Post => SpinMethod::Post,
+                Method::Put => SpinMethod::Put,
+                Method::Patch => SpinMethod::Patch,
+                Method::Delete => SpinMethod::Delete,
+            };
+
+            req_builder.method(spin_method).uri(&self.url);
 
             for (key, value) in self.headers {
-                req_builder = req_builder.header(key, value);
+                req_builder.header(key, value);
             }
 
-            let req = req_builder.body(self.body)?;
-            let res = send(req).await?;
+            if !self.body.is_empty() {
+                req_builder.body(self.body);
+            }
 
-            let status = res.status().as_u16();
-            let headers = res
-                .headers()
-                .iter()
-                .filter_map(|(k, v)| v.to_str().ok().map(|vv| (k.to_string(), vv.to_string())))
-                .collect();
+            let req = req_builder.build();
+            let res: SpinResponse = send(req).await?;
 
             Ok(Response {
-                status,
-                headers,
-                body: res.body().to_vec(),
+                status: res.status().as_u16(),
+                headers: Vec::new(),
+                body: res.into_body(),
             })
         }
 
