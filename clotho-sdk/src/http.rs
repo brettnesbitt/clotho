@@ -135,7 +135,7 @@ impl<'a> RequestBuilder<'a> {
             let res: SpinResponse = send(req).await?;
 
             Ok(Response {
-                status: res.status().as_u16(),
+                status: *res.status(),
                 headers: Vec::new(),
                 body: res.into_body(),
             })
