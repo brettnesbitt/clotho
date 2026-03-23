@@ -3,6 +3,7 @@ use anyhow::{Context as AnyhowContext, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use crate::http::Client;
 
 #[cfg(feature = "batch")]
 use polars::prelude::*;
@@ -42,7 +43,7 @@ pub struct MongoAtlasLookup {
     lookup_field: String,
     /// The user-defined aggregation pipeline to run AFTER the initial key match
     base_pipeline: Vec<serde_json::Value>,
-    client: reqwest::Client,
+    client: Client,
 }
 
 impl MongoAtlasLookup {
@@ -51,7 +52,7 @@ impl MongoAtlasLookup {
             config,
             lookup_field: lookup_field.to_string(),
             base_pipeline: vec![],
-            client: reqwest::Client::new(),
+            client: Client::new(),
         }
     }
 
@@ -96,15 +97,20 @@ impl LookupTarget for MongoAtlasLookup {
 
         // 2. Execute the HTTP Request
         let url = format!("{}/action/aggregate", self.config.endpoint);
-        let res = self.client.post(&url)
+        let req = self.client.post(&url)
             .header("api-key", &self.config.api_key)
             .header("Content-Type", "application/json")
-            .json(&payload)
-            .send()
-            .await?
-            .error_for_status()?; // Fails immediately if API Key/Cluster is invalid
+            .json(&payload)?;
 
-        let atlas_res: AtlasResponse = res.json().await?;
+        let res = req.send().await?;
+        if !res.is_success() {
+            anyhow::bail!(
+                "MongoAtlasLookup aggregate failed with status {}",
+                res.status()
+            );
+        }
+
+        let atlas_res: AtlasResponse = res.json()?;
         let documents = atlas_res.documents.unwrap_or_default();
 
         if documents.is_empty() {
@@ -132,7 +138,7 @@ impl LookupTarget for MongoAtlasLookup {
 pub struct MongoAtlasSource {
     config: AtlasConfig,
     pipeline: Vec<serde_json::Value>,
-    client: reqwest::Client,
+    client: Client,
 }
 
 impl MongoAtlasSource {
@@ -140,7 +146,7 @@ impl MongoAtlasSource {
         Self {
             config,
             pipeline: vec![],
-            client: reqwest::Client::new(),
+            client: Client::new(),
         }
     }
 
@@ -165,20 +171,32 @@ impl Source<DataFrame> for MongoAtlasSource {
         let url = format!("{}/action/aggregate", self.config.endpoint);
         
         // Execute request
-        let res_result = self.client.post(&url)
+        let req_result = self.client.post(&url)
             .header("api-key", &self.config.api_key)
-            .json(&payload)
-            .send()
-            .await;
+            .json(&payload);
+
+        let req = match req_result {
+            Ok(r) => r,
+            Err(e) => return Some(Err(e)),
+        };
+
+        let res_result = req.send().await;
 
         let res = match res_result {
             Ok(r) => r,
             Err(e) => return Some(Err(e.into())),
         };
 
-        let atlas_res: AtlasResponse = match res.json().await {
+        if !res.is_success() {
+            return Some(Err(anyhow::anyhow!(
+                "MongoAtlasSource aggregate failed with status {}",
+                res.status()
+            )));
+        }
+
+        let atlas_res: AtlasResponse = match res.json() {
             Ok(r) => r,
-            Err(e) => return Some(Err(e.into())),
+            Err(e) => return Some(Err(e)),
         };
 
         let documents = atlas_res.documents.unwrap_or_default();
@@ -203,14 +221,14 @@ impl Source<DataFrame> for MongoAtlasSource {
 /// 3. THE MONGO SINK (Bulk Insert)
 pub struct MongoAtlasSink {
     config: AtlasConfig,
-    client: reqwest::Client,
+    client: Client,
 }
 
 impl MongoAtlasSink {
     pub fn new(config: AtlasConfig) -> Self {
         Self {
             config,
-            client: reqwest::Client::new(),
+            client: Client::new(),
         }
     }
 }
@@ -242,12 +260,17 @@ impl Sink<DataFrame> for MongoAtlasSink {
         };
 
         let url = format!("{}/action/insertMany", self.config.endpoint);
-        self.client.post(&url)
+        let req = self.client.post(&url)
             .header("api-key", &self.config.api_key)
-            .json(&payload)
-            .send()
-            .await?
-            .error_for_status()?; // Throws if the bulk insert fails
+            .json(&payload)?;
+
+        let res = req.send().await?;
+        if !res.is_success() {
+            anyhow::bail!(
+                "MongoAtlasSink insertMany failed with status {}",
+                res.status()
+            );
+        }
 
         Ok(())
     }
