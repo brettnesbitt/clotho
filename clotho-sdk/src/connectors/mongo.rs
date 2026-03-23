@@ -375,6 +375,19 @@ impl Sink<Vec<serde_json::Value>> for MongoSink {
             let body = res.text().unwrap_or_default();
             anyhow::bail!("Clotho Data Proxy error ({}): {}", status, body);
         }
+
+        let body = res.text().unwrap_or_default();
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+            let inserted = v.get("inserted_count").and_then(|n| n.as_u64()).unwrap_or(0);
+            let duplicates = v.get("duplicate_count").and_then(|n| n.as_u64()).unwrap_or(0);
+            eprintln!(
+                "[MongoSink] insert-many {}.{} inserted={} duplicates={}",
+                self.db,
+                self.coll,
+                inserted,
+                duplicates
+            );
+        }
         Ok(())
     }
 }

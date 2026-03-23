@@ -103,9 +103,16 @@ pub fn emit_lifecycle(pipeline_id: &str, event: &str, boot_ms: Option<u64>, ttfr
 
 /// Emit a lifecycle event with an explicit runtime duration (used for FINISHED).
 pub fn emit_lifecycle_with_runtime(pipeline_id: &str, event: &str, boot_ms: Option<u64>, ttfr_ms: Option<u64>, runtime_ms: Option<u64>) {
+    let ts = now_secs();
     eprintln!(
-        "[Clotho Telemetry] pipeline={} event={} boot_ms={:?} ttfr_ms={:?} runtime_ms={:?} uptime_ms={}",
-        pipeline_id, event, boot_ms, ttfr_ms, runtime_ms, uptime_ms()
+        "[Clotho Telemetry] ts={} pipeline={} event={} boot_latency_ms={:?} ttfr_ms={:?} runtime_ms={:?} process_uptime_ms={}",
+        ts,
+        pipeline_id,
+        event,
+        boot_ms,
+        ttfr_ms,
+        runtime_ms,
+        uptime_ms()
     );
 
     let envelope = LifecycleEnvelope {
@@ -113,7 +120,7 @@ pub fn emit_lifecycle_with_runtime(pipeline_id: &str, event: &str, boot_ms: Opti
         payload: LifecyclePayload {
             pipeline_id: pipeline_id.to_string(),
             event: event.to_string(),
-            timestamp: now_secs(),
+            timestamp: ts,
             boot_latency_ms: boot_ms,
             ttfr_ms,
             runtime_ms,

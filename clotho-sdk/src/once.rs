@@ -103,6 +103,8 @@ where T: Send + Sync + 'static
 
         // 3. Sink
         if let Some(ctx) = current {
+            let ttfr_ms = telemetry::uptime_ms();
+            telemetry::emit_lifecycle(&pipeline_id, "FIRST_WRITE", None, Some(ttfr_ms));
             sink.write(ctx).await?;
         }
 
