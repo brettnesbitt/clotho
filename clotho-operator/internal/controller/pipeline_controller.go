@@ -709,7 +709,9 @@ func (r *PipelineReconciler) validateDAG(pipeline *clothov1alpha1.Pipeline) erro
 	return nil
 }
 
-// reconcileStage creates or updates a workload for a single stage
+// reconcileStage creates or updates a workload for a single stage.
+// Unlike single-stage pipelines, stage workloads are owned by the real parent
+// pipeline (which has a UID) rather than an ephemeral intermediate object.
 func (r *PipelineReconciler) reconcileStage(ctx context.Context, pipeline *clothov1alpha1.Pipeline, stage *clothov1alpha1.PipelineStage) error {
 	log := log.FromContext(ctx)
 
@@ -719,6 +721,12 @@ func (r *PipelineReconciler) reconcileStage(ctx context.Context, pipeline *cloth
 	// Merge stage config with pipeline config
 	config := append([]clothov1alpha1.ConfigVar{}, pipeline.Spec.Config...)
 	config = append(config, stage.Config...)
+
+	// Inject entrypoint so the container knows which stage code to run
+	config = append(config, clothov1alpha1.ConfigVar{
+		Name:  "CLOTHO_STAGE_ENTRYPOINT",
+		Value: stage.Entrypoint,
+	})
 
 	// Add bus configuration for inter-stage communication
 	if len(stage.DependsOn) > 0 {
@@ -761,39 +769,68 @@ func (r *PipelineReconciler) reconcileStage(ctx context.Context, pipeline *cloth
 		resources = *stage.Resources
 	}
 
-	// Create a temporary pipeline object for this stage
-	stagePipeline := &clothov1alpha1.Pipeline{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      stageName,
-			Namespace: pipeline.Namespace,
-			Labels: map[string]string{
-				"managed-by":          "clotho",
-				"clotho.run/pipeline": pipeline.Name,
-				"clotho.run/stage":    stage.Name,
-			},
-		},
-		Spec: clothov1alpha1.PipelineSpec{
-			Runtime:   pipeline.Spec.Runtime,
-			Mode:      pipeline.Spec.Mode,
-			Image:     pipeline.Spec.Image,
-			Config:    config,
-			Resources: resources,
-			Replicas:  stage.Replicas,
-			Schedule:  stage.Schedule,
-		},
+	// Build a spec struct for the stage (used only for constructing the workload,
+	// NOT as a K8s object — avoids the ephemeral-UID owner reference bug).
+	stageSpec := clothov1alpha1.PipelineSpec{
+		Runtime:   pipeline.Spec.Runtime,
+		Mode:      pipeline.Spec.Mode,
+		Image:     pipeline.Spec.Image,
+		Config:    config,
+		Resources: resources,
+		Replicas:  stage.Replicas,
+		Schedule:  stage.Schedule,
 	}
 
-	// Set owner reference to the parent pipeline
-	if err := ctrl.SetControllerReference(pipeline, stagePipeline, r.Scheme); err != nil {
-		return err
-	}
-
-	// Deploy based on runtime
+	// Deploy based on runtime — owner reference is always the real parent pipeline
 	switch pipeline.Spec.Runtime {
 	case clothov1alpha1.PipelineRuntimeNative:
-		return r.reconcileNativeDeployment(ctx, stagePipeline)
+		deploy := r.constructDeployment(&clothov1alpha1.Pipeline{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      stageName,
+				Namespace: pipeline.Namespace,
+			},
+			Spec: stageSpec,
+		})
+		// Owner reference to the REAL parent pipeline (has a UID)
+		if err := ctrl.SetControllerReference(pipeline, deploy, r.Scheme); err != nil {
+			return err
+		}
+		found := &appsv1.Deployment{}
+		err := r.Get(ctx, types.NamespacedName{Name: deploy.Name, Namespace: deploy.Namespace}, found)
+		if err != nil && errors.IsNotFound(err) {
+			log.Info("Creating stage Deployment", "stage", stageName)
+			return r.Create(ctx, deploy)
+		} else if err != nil {
+			return err
+		}
+		found.Spec.Replicas = deploy.Spec.Replicas
+		found.Spec.Template = deploy.Spec.Template
+		return r.Update(ctx, found)
+
 	default:
-		return r.reconcileSpinApp(ctx, stagePipeline)
+		spinApp := r.constructSpinApp(&clothov1alpha1.Pipeline{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      stageName,
+				Namespace: pipeline.Namespace,
+			},
+			Spec: stageSpec,
+		})
+		// Owner reference to the REAL parent pipeline (has a UID)
+		if err := ctrl.SetControllerReference(pipeline, spinApp, r.Scheme); err != nil {
+			return err
+		}
+		return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			found := &spinva1.SpinApp{}
+			err := r.Get(ctx, types.NamespacedName{Name: spinApp.Name, Namespace: spinApp.Namespace}, found)
+			if err != nil && errors.IsNotFound(err) {
+				log.Info("Creating stage SpinApp", "stage", stageName)
+				return r.Create(ctx, spinApp)
+			} else if err != nil {
+				return err
+			}
+			found.Spec = spinApp.Spec
+			return r.Update(ctx, found)
+		})
 	}
 }
 

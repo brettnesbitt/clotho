@@ -2,6 +2,8 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse_macro_input, ItemFn};
 
+/// The "Smart" macro that auto-detects based on function signature.
+/// Kept for backward compatibility.
 #[proc_macro_attribute]
 pub fn main(_args: TokenStream, item: TokenStream) -> TokenStream {
     let input_fn = parse_macro_input!(item as ItemFn);
@@ -9,9 +11,6 @@ pub fn main(_args: TokenStream, item: TokenStream) -> TokenStream {
     // 1. Inspect the function signature
     let fn_name = &input_fn.sig.ident;
     let inputs = &input_fn.sig.inputs;
-    let body = &input_fn.block;
-    let vis = &input_fn.vis;
-    let sig = &input_fn.sig;
 
     // 2. Logic: Daemon vs. Webhook
     // If the function is named "main" and takes 0 arguments -> Daemon (Stream/Batch)
@@ -22,6 +21,22 @@ pub fn main(_args: TokenStream, item: TokenStream) -> TokenStream {
     } else {
         impl_webhook_entrypoint(input_fn)
     }
+}
+
+/// Explicit Wasm job macro - generates Spin HTTP component.
+/// Use this for short-lived, request-response workloads (webhooks, batch jobs).
+#[proc_macro_attribute]
+pub fn job(_args: TokenStream, item: TokenStream) -> TokenStream {
+    let input_fn = parse_macro_input!(item as ItemFn);
+    impl_webhook_entrypoint(input_fn)
+}
+
+/// Explicit native daemon macro - generates standard Tokio runtime.
+/// Use this for long-lived processes (WebSocket firehoses, streaming daemons).
+#[proc_macro_attribute]
+pub fn daemon(_args: TokenStream, item: TokenStream) -> TokenStream {
+    let input_fn = parse_macro_input!(item as ItemFn);
+    impl_native_daemon_entrypoint(input_fn)
 }
 
 /// Generates a Spin HTTP component wrapper for pipeline-style (main) functions.
@@ -107,6 +122,42 @@ fn impl_webhook_entrypoint(input_fn: ItemFn) -> TokenStream {
             let result = async { #body }.await;
             let duration = start.elapsed().as_millis() as u64;
 
+            result
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
+/// Generates a standard Tokio runtime for native Kubernetes pods.
+/// Use this for long-lived processes like WebSocket firehoses that need
+/// persistent connections and can't work in Wasm's request-response model.
+fn impl_native_daemon_entrypoint(input_fn: ItemFn) -> TokenStream {
+    let body = &input_fn.block;
+
+    let expanded = quote! {
+        #[tokio::main]
+        async fn main() -> anyhow::Result<()> {
+            // Initialize native telemetry agent (UDP to DaemonSet)
+            ::clotho::telemetry::init_native_agent();
+            
+            let pipeline_id = std::env::var("CLOTHO_PIPELINE_ID")
+                .unwrap_or_else(|_| "daemon".into());
+            
+            eprintln!("[Clotho] Native daemon starting: {}", pipeline_id);
+            
+            // Run the daemon loop
+            let result: anyhow::Result<()> = async { #body }.await;
+            
+            match &result {
+                Ok(_) => {
+                    eprintln!("[Clotho] Daemon completed successfully");
+                }
+                Err(e) => {
+                    eprintln!("[Clotho] Daemon failed: {}", e);
+                }
+            }
+            
             result
         }
     };

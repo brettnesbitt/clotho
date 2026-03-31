@@ -19,7 +19,7 @@ pub use clotho_macros::main;
 pub use builtins::{IntervalSource, MemorySink, MemorySource, memory_channel};
 
 // Re-export bus types for DAG pipelines
-pub use bus::{BusSource, BusSink, BusConfig, bus_source, bus_sink, bus_source_with_group};
+pub use bus::{BusSource, BusSink, BusConfig, bus_source, bus_sink};
 
 // Only compile Batch engine if requested
 #[cfg(feature = "batch")]
