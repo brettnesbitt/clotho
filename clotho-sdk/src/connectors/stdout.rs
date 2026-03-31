@@ -30,7 +30,8 @@ impl Default for StdoutSink {
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
 // Notice the trait bound: `T: Debug`. This is the magic key.
 impl<T> Sink<T> for StdoutSink 
 where 

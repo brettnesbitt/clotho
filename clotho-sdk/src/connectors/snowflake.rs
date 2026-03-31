@@ -1,7 +1,7 @@
-use crate::traits::{Sink, Context};
+use crate::traits::{Sink, Source, Context};
 use anyhow::{Context as AnyhowContext, Result};
 use async_trait::async_trait;
-use reqwest::{Client, header};
+use crate::http::Client;
 use serde::Serialize;
 
 #[cfg(feature = "batch")]
@@ -74,13 +74,15 @@ impl Sink<DataFrame> for SnowflakeSink {
 
         // 2. Execute via HTTP (100% Wasm Native)
         self.client.post(&url)
-            .header(header::AUTHORIZATION, format!("Bearer {}", self.config.jwt_token))
-            .header(header::ACCEPT, "application/json")
-            .json(&req_body)
+            .header("authorization", &format!("Bearer {}", self.config.jwt_token))
+            .header("accept", "application/json")
+            .json(&req_body)?
             .send()
-            .await?
-            .error_for_status()
-            .context("Snowflake API rejected the bulk insert")?;
+            .await
+            .context("Failed to call Snowflake API")?
+            .is_success()
+            .then_some(())
+            .ok_or_else(|| anyhow::anyhow!("Snowflake API rejected the bulk insert"))?;
 
         Ok(())
     }
@@ -125,20 +127,30 @@ impl Source<DataFrame> for SnowflakeSource {
         let url = format!("https://{}.snowflakecomputing.com/api/v2/statements", self.config.account);
 
         // 1. Submit the Query
-        let res = match self.client.post(&url)
-            .header(reqwest::header::AUTHORIZATION, format!("Bearer {}", self.config.jwt_token))
-            .header(reqwest::header::ACCEPT, "application/json")
+        let req = match self.client.post(&url)
+            .header("authorization", &format!("Bearer {}", self.config.jwt_token))
+            .header("accept", "application/json")
             .json(&req_body)
-            .send()
-            .await 
         {
             Ok(r) => r,
+            Err(e) => return Some(Err(e)),
+        };
+
+        let res = match req.send().await {
+            Ok(resp) => resp,
             Err(e) => return Some(Err(e.into())),
         };
 
-        let json_response: serde_json::Value = match res.json().await {
+        if !res.is_success() {
+            return Some(Err(anyhow::anyhow!(
+                "Snowflake query failed with status {}",
+                res.status()
+            )));
+        }
+
+        let json_response: serde_json::Value = match res.json() {
             Ok(j) => j,
-            Err(e) => return Some(Err(e.into())),
+            Err(e) => return Some(Err(e)),
         };
 
         // 2. Parse the Snowflake REST API response format

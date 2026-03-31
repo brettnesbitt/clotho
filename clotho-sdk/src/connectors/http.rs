@@ -1,7 +1,7 @@
 use crate::traits::{Source, Sink, Context};
 use anyhow::Result;
 use async_trait::async_trait;
-use reqwest::{Client, Method, header::HeaderMap};
+use crate::http::{Client, Method};
 
 #[cfg(feature = "batch")]
 use polars::prelude::*;
@@ -10,7 +10,7 @@ pub struct HttpSink {
     client: Client,
     url: String,
     method: Method,
-    headers: HeaderMap,
+    headers: Vec<(String, String)>,
 }
 
 impl HttpSink {
@@ -18,16 +18,13 @@ impl HttpSink {
         Self {
             client: Client::new(),
             url: url.to_string(),
-            method: Method::POST,
-            headers: HeaderMap::new(),
+            method: Method::Post,
+            headers: Vec::new(),
         }
     }
 
     pub fn with_header(mut self, key: &str, value: &str) -> Self {
-        self.headers.insert(
-            reqwest::header::HeaderName::from_bytes(key.as_bytes()).unwrap(),
-            reqwest::header::HeaderValue::from_str(value).unwrap()
-        );
+        self.headers.push((key.to_string(), value.to_string()));
         self
     }
 }
@@ -36,20 +33,28 @@ impl HttpSink {
 #[async_trait]
 impl Sink<serde_json::Value> for HttpSink {
     async fn write(&mut self, ctx: Context<serde_json::Value>) -> Result<()> {
-        let mut req_headers = self.headers.clone();
-        
-        // DISTRIBUTED TRACING: Pass the Trace ID to the next microservice!
-        req_headers.insert(
-            "X-Clotho-Trace-Id", 
-            reqwest::header::HeaderValue::from_str(&ctx.span_id)?
-        );
+        let mut req = match self.method {
+            Method::Get => self.client.get(&self.url),
+            Method::Post => self.client.post(&self.url),
+            Method::Put => self.client.put(&self.url),
+            Method::Patch => self.client.patch(&self.url),
+            Method::Delete => self.client.delete(&self.url),
+        };
 
-        self.client.request(self.method.clone(), &self.url)
-            .headers(req_headers)
-            .json(&ctx.data)
+        for (key, value) in &self.headers {
+            req = req.header(key, value);
+        }
+
+        req = req.header("X-Clotho-Trace-Id", &ctx.span_id);
+
+        let res = req
+            .json(&ctx.data)?
             .send()
-            .await?
-            .error_for_status()?;
+            .await?;
+
+        if !res.is_success() {
+            anyhow::bail!("HttpSink request failed with status {}", res.status());
+        }
 
         Ok(())
     }
@@ -80,11 +85,15 @@ impl Source<DataFrame> for HttpSource {
             Err(e) => return Some(Err(e.into())),
         };
 
+        if !res.is_success() {
+            return Some(Err(anyhow::anyhow!(
+                "HttpSource request failed with status {}",
+                res.status()
+            )));
+        }
+
         // Expecting the API to return a JSON Array: [{"id": 1}, {"id": 2}]
-        let bytes = match res.bytes().await {
-            Ok(b) => b.to_vec(),
-            Err(e) => return Some(Err(e.into())),
-        };
+        let bytes = res.into_bytes();
 
         let cursor = std::io::Cursor::new(bytes);
         

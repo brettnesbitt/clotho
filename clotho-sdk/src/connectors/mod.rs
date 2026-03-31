@@ -7,10 +7,10 @@ pub mod stdout;
 // TODO: Fix these connectors - missing dependencies or incomplete implementations
 // pub mod http;
 
-pub mod kafka;
-pub mod mongo_atlas;
+// pub mod kafka;       // TODO: fix missing rskafka + DataFormat imports
+// pub mod mongo_atlas;  // TODO: fix missing deps
 
-// pub mod mongo;
+pub mod mongo;
 // pub mod mqtt;
 // pub mod postgres;
 // pub mod s3;

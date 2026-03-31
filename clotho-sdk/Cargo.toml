@@ -24,9 +24,6 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 bson = "2.11"
 futures-util = "0.3"
 
-# HTTP client (works on both — Spin patches reqwest for WASI HTTP)
-reqwest = { version = "0.11", features = ["json"] }
-
 # Optional: only needed for native (non-Spin) runtimes
 tokio = { version = "1.0", features = ["sync", "macros", "io-util", "rt", "rt-multi-thread", "time", "net", "signal"], optional = true }
 tokio-tungstenite = { version = "0.21", features = ["native-tls"], optional = true }
@@ -34,6 +31,10 @@ tokio-tungstenite = { version = "0.21", features = ["native-tls"], optional = tr
 # MongoDB native driver — only for non-WASM targets (pulls in tokio networking)
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 mongodb = "2.8"
+reqwest = { version = "0.11", features = ["json"] }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+spin-sdk = { version = "3.1" }
 
 # Optional dependencies for Batch Engine
 polars = { version = "0.36", features = ["lazy", "ndarray", "simd"], optional = true }

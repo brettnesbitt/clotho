@@ -192,11 +192,11 @@ spec:
               resources:
                 default:
                   limits:
-                    cpu: 500m
+                    cpu: 100m
                     memory: 128Mi
                   requests:
-                    cpu: 100m
-                    memory: 64Mi
+                    cpu: 5m
+                    memory: 32Mi
                 description: |-
                   3. Compute Requirements (The "Iron")
                   Defines CPU/Memory limits. If not set, defaults to a "Tiny" profile.

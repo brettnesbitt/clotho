@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use anyhow::Result;
 pub use crate::types::Context;
 
+#[cfg(not(target_family = "wasm"))]
 #[async_trait]
 pub trait Source<T>: Send + Sync {
     /// Returns the next item wrapped in Context. 
@@ -12,9 +13,23 @@ pub trait Source<T>: Send + Sync {
     fn size_hint(&self) -> Option<u64> { None }
 }
 
+#[cfg(target_family = "wasm")]
+#[async_trait(?Send)]
+pub trait Source<T> {
+    async fn next(&mut self) -> Option<Result<Context<T>>>;
+    fn size_hint(&self) -> Option<u64> { None }
+}
+
+#[cfg(not(target_family = "wasm"))]
 #[async_trait]
 pub trait Sink<T>: Send + Sync {
     /// Accepts a Context. Sinks are responsible for serializing the Trace headers.
+    async fn write(&mut self, item: Context<T>) -> Result<()>;
+}
+
+#[cfg(target_family = "wasm")]
+#[async_trait(?Send)]
+pub trait Sink<T> {
     async fn write(&mut self, item: Context<T>) -> Result<()>;
 }
 

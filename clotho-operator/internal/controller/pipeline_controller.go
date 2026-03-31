@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -27,8 +28,10 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 )
 
 // PipelineReconciler reconciles a Pipeline object
@@ -82,14 +85,22 @@ func (r *PipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	// 3. Deploy based on Runtime
-	switch pipeline.Spec.Runtime {
-	case clothov1alpha1.PipelineRuntimeNative:
-		if err := r.reconcileNativeDeployment(ctx, &pipeline); err != nil {
+	// Check if this is a DAG pipeline with stages
+	if len(pipeline.Spec.Stages) > 0 {
+		if err := r.reconcileDAGPipeline(ctx, &pipeline); err != nil {
 			return ctrl.Result{}, err
 		}
-	default: // wasm (default)
-		if err := r.reconcileSpinApp(ctx, &pipeline); err != nil {
-			return ctrl.Result{}, err
+	} else {
+		// Single-stage pipeline (legacy behavior)
+		switch pipeline.Spec.Runtime {
+		case clothov1alpha1.PipelineRuntimeNative:
+			if err := r.reconcileNativeDeployment(ctx, &pipeline); err != nil {
+				return ctrl.Result{}, err
+			}
+		default: // wasm (default)
+			if err := r.reconcileSpinApp(ctx, &pipeline); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 	}
 
@@ -161,23 +172,11 @@ func (r *PipelineReconciler) constructSpinApp(p *clothov1alpha1.Pipeline) *spinv
 		}
 
 		// Handle Secret Reference
-		// If 'ValueFrom' causes an error, it means SpinVar might have 'SecretKeyRef' directly.
-		// We try the standard K8s pattern first.
 		if cfg.ValueFrom != nil && cfg.ValueFrom.SecretKeyRef != nil {
-			// Note: If SpinVar doesn't support ValueFrom, we might need to check the struct definition.
-			// Assuming standard mapping for now:
-			/* WARNING: If this fails, SpinVar likely has 'SecretKeyRef' as a top-level field.
-			   We are assuming:
-			   type SpinVar struct {
-			       Name string
-			       Value string
-			       ValueFrom *corev1.EnvVarSource
-			   }
-			*/
-			// Let's try to map it to a standard EnvVarSource for now
-			// If SpinVar expects a custom source, the compiler will correct us.
-			// checks for direct fields:
-			// SecretKeyRef: cfg.ValueFrom.SecretKeyRef,
+			selector := *cfg.ValueFrom.SecretKeyRef
+			v.ValueFrom = &corev1.EnvVarSource{
+				SecretKeyRef: &selector,
+			}
 		}
 
 		vars = append(vars, v)
@@ -216,17 +215,19 @@ func (r *PipelineReconciler) reconcileSpinApp(ctx context.Context, pipeline *clo
 		return err
 	}
 
-	found := &spinva1.SpinApp{}
-	err := r.Get(ctx, types.NamespacedName{Name: spinApp.Name, Namespace: spinApp.Namespace}, found)
-	if err != nil && errors.IsNotFound(err) {
-		log.Info("Creating new SpinApp", "Namespace", spinApp.Namespace, "Name", spinApp.Name)
-		return r.Create(ctx, spinApp)
-	} else if err != nil {
-		return err
-	}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		found := &spinva1.SpinApp{}
+		err := r.Get(ctx, types.NamespacedName{Name: spinApp.Name, Namespace: spinApp.Namespace}, found)
+		if err != nil && errors.IsNotFound(err) {
+			log.Info("Creating new SpinApp", "Namespace", spinApp.Namespace, "Name", spinApp.Name)
+			return r.Create(ctx, spinApp)
+		} else if err != nil {
+			return err
+		}
 
-	found.Spec = spinApp.Spec
-	return r.Update(ctx, found)
+		found.Spec = spinApp.Spec
+		return r.Update(ctx, found)
+	})
 }
 
 // reconcileNativeDeployment handles native pipelines by creating/updating a Deployment
@@ -339,6 +340,21 @@ func (r *PipelineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // Builder jobs push to HTTPS endpoint. Kubelet pulls with TLS verification.
 const internalRegistry = "clotho-registry.clotho-system.svc.cluster.local:5000"
 
+func sanitizeImageTagPart(input string) string {
+	replacer := strings.NewReplacer(
+		"/", "-",
+		":", "-",
+		"@", "-",
+		" ", "-",
+	)
+	sanitized := replacer.Replace(input)
+	sanitized = strings.Trim(sanitized, "-.")
+	if sanitized == "" {
+		return "main"
+	}
+	return sanitized
+}
+
 func (r *PipelineReconciler) reconcileBuild(ctx context.Context, pipeline *clothov1alpha1.Pipeline) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
 
@@ -397,7 +413,7 @@ func (r *PipelineReconciler) reconcileBuild(ctx context.Context, pipeline *cloth
 
 	// Generate a unique tag: <reference>-<unix-timestamp>
 	// This ensures containerd pulls a fresh artifact on every build.
-	tag := fmt.Sprintf("%s-%d", pipeline.Spec.Reference, time.Now().Unix())
+	tag := fmt.Sprintf("%s-%d", sanitizeImageTagPart(pipeline.Spec.Reference), time.Now().Unix())
 	targetImage := fmt.Sprintf("%s/%s:%s", internalRegistry, pipeline.Name, tag)
 
 	// Create the Build Job
@@ -412,6 +428,8 @@ func (r *PipelineReconciler) reconcileBuild(ctx context.Context, pipeline *cloth
 		},
 		Spec: batchv1.JobSpec{
 			TTLSecondsAfterFinished: int32Ptr(600),
+			ActiveDeadlineSeconds:   int64Ptr(1800),
+			BackoffLimit:            int32Ptr(2),
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					RestartPolicy: corev1.RestartPolicyOnFailure,
@@ -425,6 +443,14 @@ func (r *PipelineReconciler) reconcileBuild(ctx context.Context, pipeline *cloth
 							pipeline.Spec.Path,
 						},
 						Env: r.buildEnvVars(pipeline),
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceMemory: resource.MustParse("256Mi"),
+							},
+							Limits: corev1.ResourceList{
+								corev1.ResourceMemory: resource.MustParse("2560Mi"),
+							},
+						},
 						VolumeMounts: []corev1.VolumeMount{
 							{
 								Name:      "cargo-cache",
@@ -480,6 +506,7 @@ func (r *PipelineReconciler) reconcileBuild(ctx context.Context, pipeline *cloth
 }
 
 func int32Ptr(i int32) *int32 { return &i }
+func int64Ptr(i int64) *int64 { return &i }
 func boolPtr(b bool) *bool    { return &b }
 
 // buildEnvVars creates environment variables for the builder job.
@@ -588,6 +615,186 @@ func (r *PipelineReconciler) reconcileIntervalSchedule(ctx context.Context, pipe
 
 	log.Info("Pipeline invoked successfully", "pipeline", pipeline.Name, "nextIn", interval.String())
 	return ctrl.Result{RequeueAfter: interval}, nil
+}
+
+// reconcileDAGPipeline handles DAG-based pipelines with multiple stages.
+// Each stage becomes a separate Deployment/SpinApp, and the operator manages
+// the inter-stage communication via the message bus.
+func (r *PipelineReconciler) reconcileDAGPipeline(ctx context.Context, pipeline *clothov1alpha1.Pipeline) error {
+	log := log.FromContext(ctx)
+
+	log.Info("Reconciling DAG pipeline", "pipeline", pipeline.Name, "stages", len(pipeline.Spec.Stages))
+
+	// Validate DAG structure
+	if err := r.validateDAG(pipeline); err != nil {
+		return fmt.Errorf("invalid DAG structure: %w", err)
+	}
+
+	// Create workloads for each stage
+	for _, stage := range pipeline.Spec.Stages {
+		if err := r.reconcileStage(ctx, pipeline, &stage); err != nil {
+			return fmt.Errorf("failed to reconcile stage %s: %w", stage.Name, err)
+		}
+	}
+
+	return nil
+}
+
+// validateDAG validates the DAG structure of a pipeline
+func (r *PipelineReconciler) validateDAG(pipeline *clothov1alpha1.Pipeline) error {
+	stageNames := make(map[string]bool)
+
+	// Collect all stage names
+	for _, stage := range pipeline.Spec.Stages {
+		if stage.Name == "" {
+			return fmt.Errorf("stage name cannot be empty")
+		}
+		if stageNames[stage.Name] {
+			return fmt.Errorf("duplicate stage name: %s", stage.Name)
+		}
+		stageNames[stage.Name] = true
+	}
+
+	// Validate dependencies
+	for _, stage := range pipeline.Spec.Stages {
+		for _, dep := range stage.DependsOn {
+			if !stageNames[dep] {
+				return fmt.Errorf("stage %s depends on non-existent stage %s", stage.Name, dep)
+			}
+		}
+	}
+
+	// Check for cycles (simple DFS-based cycle detection)
+	visited := make(map[string]bool)
+	recStack := make(map[string]bool)
+
+	var hasCycle func(string) bool
+	hasCycle = func(stageName string) bool {
+		visited[stageName] = true
+		recStack[stageName] = true
+
+		// Find the stage
+		var stage *clothov1alpha1.PipelineStage
+		for i := range pipeline.Spec.Stages {
+			if pipeline.Spec.Stages[i].Name == stageName {
+				stage = &pipeline.Spec.Stages[i]
+				break
+			}
+		}
+
+		if stage != nil {
+			for _, dep := range stage.DependsOn {
+				if !visited[dep] {
+					if hasCycle(dep) {
+						return true
+					}
+				} else if recStack[dep] {
+					return true
+				}
+			}
+		}
+
+		recStack[stageName] = false
+		return false
+	}
+
+	for _, stage := range pipeline.Spec.Stages {
+		if !visited[stage.Name] {
+			if hasCycle(stage.Name) {
+				return fmt.Errorf("cycle detected in DAG")
+			}
+		}
+	}
+
+	return nil
+}
+
+// reconcileStage creates or updates a workload for a single stage
+func (r *PipelineReconciler) reconcileStage(ctx context.Context, pipeline *clothov1alpha1.Pipeline, stage *clothov1alpha1.PipelineStage) error {
+	log := log.FromContext(ctx)
+
+	stageName := fmt.Sprintf("%s-%s", pipeline.Name, stage.Name)
+	log.Info("Reconciling stage", "stage", stageName, "entrypoint", stage.Entrypoint)
+
+	// Merge stage config with pipeline config
+	config := append([]clothov1alpha1.ConfigVar{}, pipeline.Spec.Config...)
+	config = append(config, stage.Config...)
+
+	// Add bus configuration for inter-stage communication
+	if len(stage.DependsOn) > 0 {
+		// This stage reads from upstream stages
+		for _, dep := range stage.DependsOn {
+			busName := fmt.Sprintf("%s-%s-out", pipeline.Name, dep)
+			config = append(config, clothov1alpha1.ConfigVar{
+				Name:  fmt.Sprintf("CLOTHO_BUS_%s", strings.ToUpper(dep)),
+				Value: busName,
+			})
+		}
+	}
+
+	// Check if this stage produces output for downstream stages
+	hasDownstream := false
+	for _, otherStage := range pipeline.Spec.Stages {
+		for _, dep := range otherStage.DependsOn {
+			if dep == stage.Name {
+				hasDownstream = true
+				break
+			}
+		}
+		if hasDownstream {
+			break
+		}
+	}
+
+	if hasDownstream {
+		// This stage writes to a bus for downstream stages
+		busName := fmt.Sprintf("%s-%s-out", pipeline.Name, stage.Name)
+		config = append(config, clothov1alpha1.ConfigVar{
+			Name:  "CLOTHO_BUS_OUT",
+			Value: busName,
+		})
+	}
+
+	// Determine resources for this stage
+	resources := pipeline.Spec.Resources
+	if stage.Resources != nil {
+		resources = *stage.Resources
+	}
+
+	// Create a temporary pipeline object for this stage
+	stagePipeline := &clothov1alpha1.Pipeline{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      stageName,
+			Namespace: pipeline.Namespace,
+			Labels: map[string]string{
+				"managed-by":          "clotho",
+				"clotho.run/pipeline": pipeline.Name,
+				"clotho.run/stage":    stage.Name,
+			},
+		},
+		Spec: clothov1alpha1.PipelineSpec{
+			Runtime:   pipeline.Spec.Runtime,
+			Mode:      pipeline.Spec.Mode,
+			Image:     pipeline.Spec.Image,
+			Config:    config,
+			Resources: resources,
+			Replicas:  stage.Replicas,
+			Schedule:  stage.Schedule,
+		},
+	}
+
+	// Set owner reference to the parent pipeline
+	if err := ctrl.SetControllerReference(pipeline, stagePipeline, r.Scheme); err != nil {
+		return err
+	}
+
+	// Deploy based on runtime
+	switch pipeline.Spec.Runtime {
+	case clothov1alpha1.PipelineRuntimeNative:
+		return r.reconcileNativeDeployment(ctx, stagePipeline)
+	default:
+		return r.reconcileSpinApp(ctx, stagePipeline)
+	}
 }
 
 // invokePipeline sends an HTTP request to the pipeline's Kubernetes service.

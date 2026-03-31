@@ -103,9 +103,16 @@ pub fn emit_lifecycle(pipeline_id: &str, event: &str, boot_ms: Option<u64>, ttfr
 
 /// Emit a lifecycle event with an explicit runtime duration (used for FINISHED).
 pub fn emit_lifecycle_with_runtime(pipeline_id: &str, event: &str, boot_ms: Option<u64>, ttfr_ms: Option<u64>, runtime_ms: Option<u64>) {
+    let ts = now_secs();
     eprintln!(
-        "[Clotho Telemetry] pipeline={} event={} boot_ms={:?} ttfr_ms={:?} runtime_ms={:?} uptime_ms={}",
-        pipeline_id, event, boot_ms, ttfr_ms, runtime_ms, uptime_ms()
+        "[Clotho Telemetry] ts={} pipeline={} event={} boot_latency_ms={:?} ttfr_ms={:?} runtime_ms={:?} process_uptime_ms={}",
+        ts,
+        pipeline_id,
+        event,
+        boot_ms,
+        ttfr_ms,
+        runtime_ms,
+        uptime_ms()
     );
 
     let envelope = LifecycleEnvelope {
@@ -113,7 +120,7 @@ pub fn emit_lifecycle_with_runtime(pipeline_id: &str, event: &str, boot_ms: Opti
         payload: LifecyclePayload {
             pipeline_id: pipeline_id.to_string(),
             event: event.to_string(),
-            timestamp: now_secs(),
+            timestamp: ts,
             boot_latency_ms: boot_ms,
             ttfr_ms,
             runtime_ms,
@@ -230,4 +237,54 @@ pub fn emit_dlq_record(pipeline_id: &str, trace_id: &str, step: &str, error: &st
         }
     }
     // Silent fail — never crash the pipeline because the dashboard is down
+}
+
+/// Data quality event payload
+#[derive(Serialize)]
+struct DataQualityPayload {
+    pipeline_id: String,
+    rule: String,
+    status: String,
+    value: Option<String>,
+    timestamp: u64,
+}
+
+/// Tagged telemetry event for data quality
+#[derive(Serialize)]
+struct DataQualityEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    payload: DataQualityPayload,
+}
+
+/// Emit a data quality check result to the Clotho Agent.
+/// Called by BatchPipeline::expect() to report contract validation results.
+pub fn emit_data_quality(pipeline_id: &str, rule: &str, status: crate::types::ContractStatus, value: Option<String>) {
+    let status_str = match &status {
+        crate::types::ContractStatus::Pass => "pass".to_string(),
+        crate::types::ContractStatus::Warning(msg) => format!("warning:{}", msg),
+        crate::types::ContractStatus::Fail => "fail".to_string(),
+    };
+
+    eprintln!(
+        "[Clotho Telemetry] pipeline={} data_quality rule={} status={}",
+        pipeline_id, rule, status_str
+    );
+
+    let event = DataQualityEvent {
+        event_type: "DataQuality".to_string(),
+        payload: DataQualityPayload {
+            pipeline_id: pipeline_id.to_string(),
+            rule: rule.to_string(),
+            status: status_str,
+            value,
+            timestamp: now_secs(),
+        },
+    };
+
+    if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
+        if let Ok(data) = serde_json::to_vec(&event) {
+            let _ = socket.send_to(&data, AGENT_ADDR);
+        }
+    }
 }

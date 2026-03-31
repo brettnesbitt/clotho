@@ -77,7 +77,7 @@ pub struct MongoLookup {
     db: String,
     coll: String,
     lookup_field: String,
-    http_client: reqwest::Client,
+    http_client: crate::http::Client,
 }
 
 #[cfg(target_family = "wasm")]
@@ -88,7 +88,7 @@ impl MongoLookup {
             db: db.into(),
             coll: coll.into(),
             lookup_field: lookup_field.to_string(),
-            http_client: reqwest::Client::new(),
+            http_client: crate::http::Client::new(),
         })
     }
 
@@ -151,6 +151,7 @@ pub struct MongoSource {
     cdc_stream: Option<mongodb::change_stream::ChangeStream<ChangeStreamEvent<Document>>>,
 }
 
+#[cfg(feature = "native")]
 impl MongoSource {
     pub async fn new(uri: &str, db: &str, coll: &str) -> Result<Self> {
         let client = Client::with_options(ClientOptions::parse(uri).await?)?;
@@ -253,7 +254,7 @@ pub struct MongoSink {
     uri: String,
     db: String,
     coll: String,
-    http_client: reqwest::Client,
+    http_client: crate::http::Client,
 }
 
 #[cfg(target_family = "wasm")]
@@ -263,13 +264,12 @@ impl MongoSink {
             uri: uri.into(),
             db: db.into(),
             coll: coll.into(),
-            http_client: reqwest::Client::new(),
+            http_client: crate::http::Client::new(),
         })
     }
 
     fn proxy_url(&self) -> String {
-        std::env::var("CLOTHO_PROXY_URL")
-            .unwrap_or_else(|_| "http://clotho-data-proxy.clotho-system.svc.cluster.local:9090".into())
+        crate::config::var_or("CLOTHO_PROXY_URL", "http://clotho-data-proxy.clotho-system.svc.cluster.local:9090")
     }
 }
 
@@ -297,7 +297,7 @@ impl Sink<serde_json::Value> for MongoSink {
 }
 
 #[cfg(target_family = "wasm")]
-#[async_trait]
+#[async_trait(?Send)]
 impl Sink<serde_json::Value> for MongoSink {
     async fn write(&mut self, ctx: Context<serde_json::Value>) -> Result<()> {
         let payload = serde_json::json!({
@@ -309,13 +309,13 @@ impl Sink<serde_json::Value> for MongoSink {
 
         let res = self.http_client
             .post(&format!("{}/v1/mongo/insert", self.proxy_url()))
-            .json(&payload)
+            .json(&payload)?
             .send()
             .await?;
 
-        if !res.status().is_success() {
+        if !res.is_success() {
             let status = res.status();
-            let body = res.text().await.unwrap_or_default();
+            let body = res.text().unwrap_or_default();
             anyhow::bail!("Clotho Data Proxy error ({}): {}", status, body);
         }
         Ok(())
@@ -351,7 +351,7 @@ impl Sink<Vec<serde_json::Value>> for MongoSink {
 }
 
 #[cfg(target_family = "wasm")]
-#[async_trait]
+#[async_trait(?Send)]
 impl Sink<Vec<serde_json::Value>> for MongoSink {
     async fn write(&mut self, ctx: Context<Vec<serde_json::Value>>) -> Result<()> {
         if ctx.data.is_empty() { return Ok(()); }
@@ -366,14 +366,27 @@ impl Sink<Vec<serde_json::Value>> for MongoSink {
 
         let res = self.http_client
             .post(&format!("{}/v1/mongo/insert-many", self.proxy_url()))
-            .json(&payload)
+            .json(&payload)?
             .send()
             .await?;
 
-        if !res.status().is_success() {
+        if !res.is_success() {
             let status = res.status();
-            let body = res.text().await.unwrap_or_default();
+            let body = res.text().unwrap_or_default();
             anyhow::bail!("Clotho Data Proxy error ({}): {}", status, body);
+        }
+
+        let body = res.text().unwrap_or_default();
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+            let inserted = v.get("inserted_count").and_then(|n| n.as_u64()).unwrap_or(0);
+            let duplicates = v.get("duplicate_count").and_then(|n| n.as_u64()).unwrap_or(0);
+            eprintln!(
+                "[MongoSink] insert-many {}.{} inserted={} duplicates={}",
+                self.db,
+                self.coll,
+                inserted,
+                duplicates
+            );
         }
         Ok(())
     }

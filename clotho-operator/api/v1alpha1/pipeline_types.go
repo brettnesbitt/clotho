@@ -87,7 +87,7 @@ type PipelineSpec struct {
 
 	// 3. Compute Requirements (The "Iron")
 	// Defines CPU/Memory limits. If not set, defaults to a "Tiny" profile.
-	// +kubebuilder:default:={requests: {cpu: "100m", memory: "64Mi"}, limits: {cpu: "500m", memory: "128Mi"}}
+	// +kubebuilder:default:={requests: {cpu: "5m", memory: "32Mi"}, limits: {cpu: "100m", memory: "128Mi"}}
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 
 	// 4. Operational Policy (The "Guardrails")
@@ -104,6 +104,67 @@ type PipelineSpec struct {
 	// If omitted, defaults to "trigger" mode (on-demand only via API).
 	// +optional
 	Schedule *ScheduleSpec `json:"schedule,omitempty"`
+
+	// 6. DAG Stages (The "Topology")
+	// Defines multi-stage pipeline topology for DAG-based pipelines.
+	// When stages are defined, the operator creates separate workloads for each stage.
+	// +optional
+	Stages []PipelineStage `json:"stages,omitempty"`
+
+	// 7. Message Bus Configuration (The "Glue")
+	// Defines the message bus used for inter-stage communication.
+	// +optional
+	MessageBus *MessageBusSpec `json:"messageBus,omitempty"`
+}
+
+// PipelineStage defines a single stage in a DAG pipeline
+type PipelineStage struct {
+	// Name is the unique identifier for this stage within the pipeline.
+	Name string `json:"name"`
+
+	// Entrypoint is the path to the Rust source file for this stage.
+	// Example: "src/ingest.rs" or "src/worker.rs"
+	Entrypoint string `json:"entrypoint"`
+
+	// Replicas is the number of replicas for this stage.
+	// +kubebuilder:default:=1
+	Replicas int32 `json:"replicas,omitempty"`
+
+	// DependsOn defines which stages must complete before this stage can start.
+	// This creates the DAG edges.
+	// +optional
+	DependsOn []string `json:"dependsOn,omitempty"`
+
+	// Resources defines compute requirements for this stage.
+	// If not set, inherits from the parent pipeline spec.
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// Config defines environment variables specific to this stage.
+	// Merged with the parent pipeline config.
+	// +optional
+	Config []ConfigVar `json:"config,omitempty"`
+
+	// Schedule defines when this stage should be invoked.
+	// Only valid for entry stages (no dependsOn).
+	// +optional
+	Schedule *ScheduleSpec `json:"schedule,omitempty"`
+}
+
+// MessageBusSpec defines the message bus configuration for inter-stage communication
+type MessageBusSpec struct {
+	// Type specifies the message bus implementation.
+	// +kubebuilder:default:="nats-jetstream"
+	// +kubebuilder:validation:Enum=nats-jetstream;kafka;redis-streams
+	Type string `json:"type"`
+
+	// ClusterRef references a NATS/Kafka/Redis cluster in the same namespace.
+	// +optional
+	ClusterRef string `json:"clusterRef,omitempty"`
+
+	// Config defines additional configuration for the message bus.
+	// +optional
+	Config map[string]string `json:"config,omitempty"`
 }
 
 // ScheduleSpec defines when the operator invokes a pipeline.

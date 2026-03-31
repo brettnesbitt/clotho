@@ -11,6 +11,7 @@ type AsyncTransformFn<T> = Box<dyn Fn(Context<T>) -> Pin<Box<dyn Future<Output =
 pub struct StreamPipeline<S, T> {
     source: S,
     transforms: Vec<AsyncTransformFn<T>>,
+    tee_sinks: Vec<Box<dyn Sink<T>>>,
 }
 
 impl<S, T> StreamPipeline<S, T> 
@@ -19,7 +20,24 @@ where
     T: Send + Sync + 'static 
 {
     pub fn new(source: S) -> Self {
-        Self { source, transforms: Vec::new() }
+        Self { 
+            source, 
+            transforms: Vec::new(),
+            tee_sinks: Vec::new(),
+        }
+    }
+
+    /// Pass-through Sink (Observer Pattern)
+    /// Takes a borrowed reference to the data, writes it to the sink asynchronously,
+    /// and passes the original data down the pipeline without consuming it.
+    /// This is like a T-junction in plumbing - data flows to both the sink and the next stage.
+    pub fn tee<K>(mut self, sink: K) -> Self 
+    where 
+        K: Sink<T> + 'static,
+        T: Clone, // Required for tee since we need to pass data to both sink and next stage
+    {
+        self.tee_sinks.push(Box::new(sink));
+        self
     }
 
     /// Synchronous Transform (CPU Bound - Math, Parsing, Filtering)
