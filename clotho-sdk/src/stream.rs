@@ -148,6 +148,24 @@ where
                         }
                     }
 
+                    // ROUTE TO TEE SINKS (Pass-through observers)
+                    if let Some(ctx) = &current {
+                        for tee_sink in &mut self.tee_sinks {
+                            // Clone the context for tee sinks (they are observers)
+                            let tee_ctx = Context {
+                                data: ctx.data.clone(),
+                                span_id: ctx.span_id.clone(),
+                                parents: ctx.parents.clone(),
+                                meta: ctx.meta.clone(),
+                            };
+                            
+                            if let Err(e) = tee_sink.write(tee_ctx).await {
+                                // Tee sink failures are logged but don't fail the pipeline
+                                eprintln!("[Clotho] Tee sink write failed: {}", e);
+                            }
+                        }
+                    }
+
                     // ROUTE TO MAIN SINK
                     if let Some(ctx) = current {
                         records_out += 1;

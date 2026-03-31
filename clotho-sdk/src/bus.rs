@@ -14,8 +14,6 @@ use tokio::sync::{broadcast, RwLock};
 pub struct BusConfig {
     /// Name of the bus (e.g., "stage_1_out")
     pub name: String,
-    /// Consumer group for load balancing (e.g., "worker_group_a")
-    pub consumer_group: Option<String>,
     /// Buffer size for the broadcast channel
     pub buffer_size: usize,
 }
@@ -24,14 +22,8 @@ impl BusConfig {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            consumer_group: None,
             buffer_size: 1024,
         }
-    }
-
-    pub fn with_consumer_group(mut self, group: impl Into<String>) -> Self {
-        self.consumer_group = Some(group.into());
-        self
     }
 
     pub fn with_buffer_size(mut self, size: usize) -> Self {
@@ -72,11 +64,6 @@ impl BusRegistry {
         tx
     }
 
-    /// Get an existing bus channel
-    async fn get_bus(&self, name: &str) -> Option<broadcast::Sender<Vec<u8>>> {
-        let buses = self.buses.read().await;
-        buses.get(name).cloned()
-    }
 }
 
 lazy_static::lazy_static! {
@@ -108,10 +95,6 @@ where
 
     pub fn name(&self) -> &str {
         &self.config.name
-    }
-
-    pub fn consumer_group(&self) -> Option<&str> {
-        self.config.consumer_group.as_deref()
     }
 }
 
@@ -222,16 +205,4 @@ where
 {
     let config = BusConfig::new(name);
     BusSink::new(config).await
-}
-
-/// Helper function to create a bus source with consumer group
-pub async fn bus_source_with_group<T>(
-    name: impl Into<String>,
-    consumer_group: impl Into<String>,
-) -> Result<BusSource<T>>
-where
-    T: serde::de::DeserializeOwned + Send + Sync + 'static,
-{
-    let config = BusConfig::new(name).with_consumer_group(consumer_group);
-    BusSource::new(config).await
 }
