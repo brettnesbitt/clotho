@@ -62,9 +62,9 @@ git checkout $REF\n\
 # Navigate to project path if specified\n\
 cd $PROJECT_PATH\n\
 \n\
-# B. Build (Release Mode)\n\
+# B. Build (Release Mode, limited parallelism to fit e2-medium nodes)\n\
 echo "🔨 Compiling Rust to Wasm..."\n\
-cargo build --target wasm32-wasip1 --release\n\
+CARGO_BUILD_JOBS=1 cargo build --target wasm32-wasip1 --release\n\
 \n\
 # C. Package & Push to Internal Registry (TLS enabled, no auth needed)\n\
 echo "📦 Packaging and Pushing to $IMAGE_TAG..."\n\

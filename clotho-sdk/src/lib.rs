@@ -9,6 +9,7 @@ pub mod builtins;
 pub mod once;
 pub mod config;
 pub mod http;
+pub mod bus;
 
 // Re-export the #[clotho::main] proc-macro attribute
 pub use clotho_macros::main;
@@ -16,6 +17,9 @@ pub use clotho_macros::main;
 // Re-export native-only types when feature is enabled
 #[cfg(feature = "native")]
 pub use builtins::{IntervalSource, MemorySink, MemorySource, memory_channel};
+
+// Re-export bus types for DAG pipelines
+pub use bus::{BusSource, BusSink, BusConfig, bus_source, bus_sink, bus_source_with_group};
 
 // Only compile Batch engine if requested
 #[cfg(feature = "batch")]
