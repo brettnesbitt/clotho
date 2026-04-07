@@ -44,6 +44,13 @@ pub fn execution_report_json() -> Option<Vec<u8>> {
     take_execution_report().and_then(|r| serde_json::to_vec(&r).ok())
 }
 
+/// Initialize the native telemetry agent (UDP sender to DaemonSet).
+/// Called by the #[clotho::daemon] macro at process startup.
+pub fn init_native_agent() {
+    mark_birth();
+    eprintln!("[Clotho Telemetry] Native agent initialized (UDP -> {})", AGENT_ADDR);
+}
+
 // 1. The Global Stopwatch
 // initialized the first time ANY code in the SDK is touched.
 static PROCESS_BIRTH: OnceLock<Instant> = OnceLock::new();

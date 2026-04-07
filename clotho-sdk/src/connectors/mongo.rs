@@ -148,7 +148,7 @@ impl LookupTarget for MongoLookup {
 pub struct MongoSource {
     collection: Collection<Document>,
     pipeline: Vec<Document>,
-    cdc_stream: Option<mongodb::change_stream::ChangeStream<ChangeStreamEvent<Document>>>,
+    cdc_stream: Option<std::sync::Arc<tokio::sync::Mutex<mongodb::change_stream::ChangeStream<ChangeStreamEvent<Document>>>>>,
 }
 
 #[cfg(feature = "native")]
@@ -171,7 +171,7 @@ impl MongoSource {
     pub async fn watch(mut self) -> Result<Self> {
         // You can pass self.pipeline here if you want to filter the CDC events natively!
         let stream = self.collection.watch(self.pipeline.clone(), None).await?;
-        self.cdc_stream = Some(stream);
+        self.cdc_stream = Some(std::sync::Arc::new(tokio::sync::Mutex::new(stream)));
         Ok(self)
     }
 }
@@ -180,12 +180,17 @@ impl MongoSource {
 #[async_trait]
 impl Source<serde_json::Value> for MongoSource {
     async fn next(&mut self) -> Option<Result<Context<serde_json::Value>>> {
-        if let Some(stream) = &mut self.cdc_stream {
+        if let Some(stream) = &self.cdc_stream {
+            let mut stream = stream.lock().await;
             match stream.next().await {
                 Some(Ok(event)) => {
-                    let json_event: serde_json::Value = bson::to_document(&event).unwrap_or_default().into();
+                    let doc = bson::to_document(&event).unwrap_or_default();
+                    let json_event: serde_json::Value = doc.into_iter()
+                        .map(|(k, v)| (k, serde_json::to_value(&v).unwrap_or_default()))
+                        .collect::<serde_json::Map<String, serde_json::Value>>()
+                        .into();
                     let trace_id = uuid::Uuid::new_v4().to_string();
-                    Some(Ok(Context::root(json_event, trace_id)))
+                    Some(Ok(Context::root(json_event, &trace_id)))
                 }
                 Some(Err(e)) => Some(Err(anyhow::anyhow!("Mongo CDC Error: {}", e))),
                 None => None,

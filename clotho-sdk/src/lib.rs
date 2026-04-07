@@ -11,8 +11,9 @@ pub mod config;
 pub mod http;
 pub mod bus;
 
-// Re-export the #[clotho::main] proc-macro attribute
+// Re-export proc-macro attributes
 pub use clotho_macros::main;
+pub use clotho_macros::daemon;
 
 // Re-export native-only types when feature is enabled
 #[cfg(feature = "native")]

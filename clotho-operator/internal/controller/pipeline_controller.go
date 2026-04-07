@@ -441,14 +441,15 @@ func (r *PipelineReconciler) reconcileBuild(ctx context.Context, pipeline *cloth
 							pipeline.Spec.Reference,
 							targetImage,
 							pipeline.Spec.Path,
+							string(pipeline.Spec.Runtime),
 						},
 						Env: r.buildEnvVars(pipeline),
 						Resources: corev1.ResourceRequirements{
 							Requests: corev1.ResourceList{
-								corev1.ResourceMemory: resource.MustParse("256Mi"),
+								corev1.ResourceMemory: resource.MustParse("1Gi"),
 							},
 							Limits: corev1.ResourceList{
-								corev1.ResourceMemory: resource.MustParse("2560Mi"),
+								corev1.ResourceMemory: resource.MustParse("4Gi"),
 							},
 						},
 						VolumeMounts: []corev1.VolumeMount{
@@ -531,6 +532,15 @@ func (r *PipelineReconciler) buildEnvVars(pipeline *clothov1alpha1.Pipeline) []c
 			},
 		},
 	})
+
+	// For native pipelines, provide the Clotho SDK repo URL so the builder
+	// can clone it alongside the source (path dependency resolution).
+	if pipeline.Spec.Runtime == clothov1alpha1.PipelineRuntimeNative {
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  "CLOTHO_SDK_REPO",
+			Value: "https://github.com/brettnesbitt/clotho.git",
+		})
+	}
 
 	return envVars
 }
@@ -791,6 +801,11 @@ func (r *PipelineReconciler) reconcileStage(ctx context.Context, pipeline *cloth
 			},
 			Spec: stageSpec,
 		})
+		// Override the container command to run the specific stage binary.
+		// The crane-built image places all binaries under /app/.
+		if stage.Entrypoint != "" && len(deploy.Spec.Template.Spec.Containers) > 0 {
+			deploy.Spec.Template.Spec.Containers[0].Command = []string{fmt.Sprintf("/app/%s", stage.Entrypoint)}
+		}
 		// Owner reference to the REAL parent pipeline (has a UID)
 		if err := ctrl.SetControllerReference(pipeline, deploy, r.Scheme); err != nil {
 			return err

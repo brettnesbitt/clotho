@@ -23,6 +23,7 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 # Serialization (works on both Spin/WASM and native)
 bson = "2.11"
 futures-util = "0.3"
+lazy_static = "1.4"
 
 # Optional: only needed for native (non-Spin) runtimes
 tokio = { version = "1.0", features = ["sync", "macros", "io-util", "rt", "rt-multi-thread", "time", "net", "signal"], optional = true }

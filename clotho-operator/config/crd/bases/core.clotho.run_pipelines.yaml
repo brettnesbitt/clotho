@@ -141,6 +141,32 @@ spec:
                   type: object
                   x-kubernetes-map-type: atomic
                 type: array
+              messageBus:
+                description: |-
+                  7. Message Bus Configuration (The "Glue")
+                  Defines the message bus used for inter-stage communication.
+                properties:
+                  clusterRef:
+                    description: ClusterRef references a NATS/Kafka/Redis cluster
+                      in the same namespace.
+                    type: string
+                  config:
+                    additionalProperties:
+                      type: string
+                    description: Config defines additional configuration for the message
+                      bus.
+                    type: object
+                  type:
+                    default: nats-jetstream
+                    description: Type specifies the message bus implementation.
+                    enum:
+                    - nats-jetstream
+                    - kafka
+                    - redis-streams
+                    type: string
+                required:
+                - type
+                type: object
               mode:
                 allOf:
                 - enum:
@@ -297,6 +323,177 @@ spec:
                 required:
                 - mode
                 type: object
+              stages:
+                description: |-
+                  6. DAG Stages (The "Topology")
+                  Defines multi-stage pipeline topology for DAG-based pipelines.
+                  When stages are defined, the operator creates separate workloads for each stage.
+                items:
+                  description: PipelineStage defines a single stage in a DAG pipeline
+                  properties:
+                    config:
+                      description: |-
+                        Config defines environment variables specific to this stage.
+                        Merged with the parent pipeline config.
+                      items:
+                        description: ConfigVar allows injecting values or secrets
+                          into the runtime
+                        properties:
+                          name:
+                            description: Name of the environment variable (e.g. "DB_PASSWORD")
+                            type: string
+                          value:
+                            description: Value is a literal string value (e.g. "production")
+                            type: string
+                          valueFrom:
+                            description: ValueFrom allows selecting a key from a Secret
+                              or ConfigMap
+                            properties:
+                              secretKeyRef:
+                                description: Selects a key from a Secret in the same
+                                  namespace
+                                properties:
+                                  key:
+                                    description: The key of the secret to select from.  Must
+                                      be a valid secret key.
+                                    type: string
+                                  name:
+                                    default: ""
+                                    description: |-
+                                      Name of the referent.
+                                      This field is effectively required, but due to backwards compatibility is
+                                      allowed to be empty. Instances of this type with an empty value here are
+                                      almost certainly wrong.
+                                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                    type: string
+                                  optional:
+                                    description: Specify whether the Secret or its
+                                      key must be defined
+                                    type: boolean
+                                required:
+                                - key
+                                type: object
+                                x-kubernetes-map-type: atomic
+                            type: object
+                        required:
+                        - name
+                        type: object
+                      type: array
+                    dependsOn:
+                      description: |-
+                        DependsOn defines which stages must complete before this stage can start.
+                        This creates the DAG edges.
+                      items:
+                        type: string
+                      type: array
+                    entrypoint:
+                      description: |-
+                        Entrypoint is the binary name for this stage.
+                        For native runtime: the compiled binary name (e.g. "ingestor", "worker").
+                        For wasm runtime: the component name within the Spin app.
+                      type: string
+                    name:
+                      description: Name is the unique identifier for this stage within
+                        the pipeline.
+                      type: string
+                    replicas:
+                      default: 1
+                      description: Replicas is the number of replicas for this stage.
+                      format: int32
+                      type: integer
+                    resources:
+                      description: |-
+                        Resources defines compute requirements for this stage.
+                        If not set, inherits from the parent pipeline spec.
+                      properties:
+                        claims:
+                          description: |-
+                            Claims lists the names of resources, defined in spec.resourceClaims,
+                            that are used by this container.
+
+                            This field depends on the
+                            DynamicResourceAllocation feature gate.
+
+                            This field is immutable. It can only be set for containers.
+                          items:
+                            description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                            properties:
+                              name:
+                                description: |-
+                                  Name must match the name of one entry in pod.spec.resourceClaims of
+                                  the Pod where this field is used. It makes that resource available
+                                  inside a container.
+                                type: string
+                              request:
+                                description: |-
+                                  Request is the name chosen for a request in the referenced claim.
+                                  If empty, everything from the claim is made available, otherwise
+                                  only the result of this request.
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          type: array
+                          x-kubernetes-list-map-keys:
+                          - name
+                          x-kubernetes-list-type: map
+                        limits:
+                          additionalProperties:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          description: |-
+                            Limits describes the maximum amount of compute resources allowed.
+                            More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                          type: object
+                        requests:
+                          additionalProperties:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          description: |-
+                            Requests describes the minimum amount of compute resources required.
+                            If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                            otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                            More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                          type: object
+                      type: object
+                    schedule:
+                      description: |-
+                        Schedule defines when this stage should be invoked.
+                        Only valid for entry stages (no dependsOn).
+                      properties:
+                        cron:
+                          description: |-
+                            Cron is a standard cron expression (e.g. "0 9 * * *").
+                            Only used when mode is "cron".
+                          type: string
+                        interval:
+                          description: |-
+                            Interval is the duration between invocations (e.g. "30s", "5m", "1h").
+                            Only used when mode is "interval".
+                          type: string
+                        mode:
+                          default: trigger
+                          description: 'Mode: "trigger" (on-demand), "interval" (every
+                            N seconds), or "cron" (cron expression).'
+                          enum:
+                          - trigger
+                          - interval
+                          - cron
+                          type: string
+                      required:
+                      - mode
+                      type: object
+                  required:
+                  - entrypoint
+                  - name
+                  type: object
+                type: array
             type: object
           status:
             description: PipelineStatus defines the observed state of Pipeline

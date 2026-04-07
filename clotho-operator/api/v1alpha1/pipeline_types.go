@@ -122,8 +122,9 @@ type PipelineStage struct {
 	// Name is the unique identifier for this stage within the pipeline.
 	Name string `json:"name"`
 
-	// Entrypoint is the path to the Rust source file for this stage.
-	// Example: "src/ingest.rs" or "src/worker.rs"
+	// Entrypoint is the binary name for this stage.
+	// For native runtime: the compiled binary name (e.g. "ingestor", "worker").
+	// For wasm runtime: the component name within the Spin app.
 	Entrypoint string `json:"entrypoint"`
 
 	// Replicas is the number of replicas for this stage.
