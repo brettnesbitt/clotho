@@ -1,0 +1,79 @@
+{{- if .Values.dataProxy.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clotho-data-proxy
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: clotho-data-proxy
+    plane: control
+    {{- include "clotho-control.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.dataProxy.replicas }}
+  selector:
+    matchLabels:
+      app: clotho-data-proxy
+  template:
+    metadata:
+      labels:
+        app: clotho-data-proxy
+        plane: control
+    spec:
+      containers:
+        - name: data-proxy
+          image: {{ include "clotho-control.dataProxyImage" . }}
+          imagePullPolicy: Always
+          ports:
+            - containerPort: {{ .Values.dataProxy.port }}
+          env:
+            - name: MONGO_URI
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.mongo.existingSecret }}
+                  name: {{ .Values.mongo.existingSecret }}
+                  {{- else }}
+                  name: clotho-mongo-credentials
+                  {{- end }}
+                  key: uri
+            - name: MONGO_DB
+              value: {{ .Values.mongo.database | default "clotho" | quote }}
+            - name: PORT
+              value: {{ .Values.dataProxy.port | quote }}
+          resources:
+            requests:
+              cpu: {{ .Values.dataProxy.resources.requests.cpu }}
+              memory: {{ .Values.dataProxy.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.dataProxy.resources.limits.cpu }}
+              memory: {{ .Values.dataProxy.resources.limits.memory }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.dataProxy.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.dataProxy.port }}
+            initialDelaySeconds: 3
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clotho-data-proxy
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: clotho-data-proxy
+    plane: control
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.dataProxy.port }}
+      targetPort: {{ .Values.dataProxy.port }}
+      protocol: TCP
+      name: http
+  selector:
+    app: clotho-data-proxy
+{{- end }}

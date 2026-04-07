@@ -26,8 +26,12 @@ spec:
           ports:
             - containerPort: {{ .Values.api.port }}
           env:
-            - name: CLOTHO_NAMESPACE
-              value: {{ .Values.pipelineNamespace | quote }}
+            - name: CLOTHO_NS_PRODUCTION
+              value: {{ .Values.environments.production.namespace | default "clotho-prod" | quote }}
+            - name: CLOTHO_NS_PREVIEW
+              value: {{ .Values.environments.preview.namespace | default "clotho-preview" | quote }}
+            - name: CLOTHO_DATA_PROXY_URL
+              value: {{ .Values.api.dataProxyUrl | default "http://clotho-data-proxy:9090" | quote }}
           resources:
             requests:
               cpu: {{ .Values.api.resources.requests.cpu }}

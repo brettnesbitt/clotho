@@ -33,6 +33,7 @@ tokio-tungstenite = { version = "0.21", features = ["native-tls"], optional = tr
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 mongodb = "2.8"
 reqwest = { version = "0.11", features = ["json"] }
+async-nats = "0.38"
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 spin-sdk = { version = "3.1" }

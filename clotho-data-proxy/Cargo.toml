@@ -1,17 +1,17 @@
 [package]
 name = "clotho-data-proxy"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+description = "MongoDB-backed data layer for the Clotho control plane"
 
 [dependencies]
 # Web framework
 axum = { version = "0.7", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.5", features = ["trace"] }
 
-# MongoDB
+# MongoDB - use 2.8 which has stable API we know
 mongodb = "2.8"
-bson = "2.11"
+bson = "2.7"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -21,8 +21,5 @@ serde_json = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Error handling
-anyhow = "1.0"
-
-# Connection pooling cache (URI → Client)
-dashmap = "5"
+# Futures for stream handling
+futures = "0.3"

@@ -55,15 +55,24 @@ if [ "$RUNTIME" = "native" ]; then
   fi
 
   echo "Compiling Rust (native)..."
+  # Override release profile to reduce peak memory usage in constrained pods.
+  # LTO and codegen-units=1 cause massive memory spikes during linking.
+  export CARGO_PROFILE_RELEASE_LTO=off
+  export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
   CARGO_BUILD_JOBS=1 cargo build --release
 
   # Collect all compiled binaries from target/release
-  # (filter to actual executables, skip .d files, build scripts, etc.)
+  # Rust release binaries have no file extension; skip .d, .rlib, etc.
   mkdir -p /tmp/image-root/app
   for bin in target/release/*; do
-    if [ -f "$bin" ] && [ -x "$bin" ] && file "$bin" | grep -q "ELF"; then
+    basename_bin=$(basename "$bin")
+    # Skip files with extensions (e.g. .d, .rlib, .rmeta, .so) and hidden/build dirs
+    case "$basename_bin" in
+      *.* | build | deps | examples | incremental | .fingerprint) continue ;;
+    esac
+    if [ -f "$bin" ] && [ -x "$bin" ]; then
       cp "$bin" /tmp/image-root/app/
-      echo "  Found binary: $(basename $bin)"
+      echo "  Found binary: $basename_bin"
     fi
   done
 
@@ -75,8 +84,23 @@ if [ "$RUNTIME" = "native" ]; then
   fi
   echo "Collected $BINARY_COUNT binaries"
 
+  # Copy shared library dependencies into the image
+  # The binaries are dynamically linked and need libssl, libcrypto, etc.
+  mkdir -p /tmp/image-root/lib/x86_64-linux-gnu /tmp/image-root/lib64
+  for bin in /tmp/image-root/app/*; do
+    ldd "$bin" 2>/dev/null | grep "=> /" | awk '{print $3}' | while read lib; do
+      cp -n "$lib" /tmp/image-root/lib/x86_64-linux-gnu/ 2>/dev/null || true
+    done
+  done
+  # Copy the dynamic linker
+  cp /lib64/ld-linux-x86-64.so.2 /tmp/image-root/lib64/ 2>/dev/null || true
+  # Copy CA certificates for TLS (needed for WSS, HTTPS, MongoDB TLS, etc.)
+  mkdir -p /tmp/image-root/etc/ssl/certs
+  cp /etc/ssl/certs/ca-certificates.crt /tmp/image-root/etc/ssl/certs/ 2>/dev/null || true
+  echo "  Copied shared libraries and CA certificates"
+
   # Create OCI layer tarball
-  tar -C /tmp/image-root -cf /tmp/layer.tar app/
+  tar -C /tmp/image-root -cf /tmp/layer.tar app/ lib/ lib64/ etc/
 
   # Build and push OCI image using crane
   # Base image: debian:bookworm-slim (matches build environment)

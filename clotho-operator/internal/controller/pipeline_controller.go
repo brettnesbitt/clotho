@@ -540,6 +540,10 @@ func (r *PipelineReconciler) buildEnvVars(pipeline *clothov1alpha1.Pipeline) []c
 			Name:  "CLOTHO_SDK_REPO",
 			Value: "https://github.com/brettnesbitt/clotho.git",
 		})
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  "CLOTHO_SDK_REF",
+			Value: "clotho-ide",
+		})
 	}
 
 	return envVars
@@ -738,15 +742,24 @@ func (r *PipelineReconciler) reconcileStage(ctx context.Context, pipeline *cloth
 		Value: stage.Entrypoint,
 	})
 
+	// Build a set of config var names already defined by the user in stage config
+	userDefinedVars := make(map[string]bool)
+	for _, cfg := range stage.Config {
+		userDefinedVars[cfg.Name] = true
+	}
+
 	// Add bus configuration for inter-stage communication
 	if len(stage.DependsOn) > 0 {
-		// This stage reads from upstream stages
+		// This stage reads from upstream stages (only inject if not user-defined)
 		for _, dep := range stage.DependsOn {
-			busName := fmt.Sprintf("%s-%s-out", pipeline.Name, dep)
-			config = append(config, clothov1alpha1.ConfigVar{
-				Name:  fmt.Sprintf("CLOTHO_BUS_%s", strings.ToUpper(dep)),
-				Value: busName,
-			})
+			envName := fmt.Sprintf("CLOTHO_BUS_%s", strings.ToUpper(dep))
+			if !userDefinedVars[envName] {
+				busName := fmt.Sprintf("%s-%s-out", pipeline.Name, dep)
+				config = append(config, clothov1alpha1.ConfigVar{
+					Name:  envName,
+					Value: busName,
+				})
+			}
 		}
 	}
 
@@ -764,12 +777,22 @@ func (r *PipelineReconciler) reconcileStage(ctx context.Context, pipeline *cloth
 		}
 	}
 
-	if hasDownstream {
-		// This stage writes to a bus for downstream stages
+	if hasDownstream && !userDefinedVars["CLOTHO_BUS_OUT"] {
+		// This stage writes to a bus for downstream stages (only inject if not user-defined)
 		busName := fmt.Sprintf("%s-%s-out", pipeline.Name, stage.Name)
 		config = append(config, clothov1alpha1.ConfigVar{
 			Name:  "CLOTHO_BUS_OUT",
 			Value: busName,
+		})
+	}
+
+	// Inject NATS URL from messageBus.clusterRef for inter-stage communication
+	if pipeline.Spec.MessageBus != nil && pipeline.Spec.MessageBus.ClusterRef != "" && !userDefinedVars["CLOTHO_NATS_URL"] {
+		natsURL := fmt.Sprintf("nats://%s.%s.svc.cluster.local:4222",
+			pipeline.Spec.MessageBus.ClusterRef, "clotho-system")
+		config = append(config, clothov1alpha1.ConfigVar{
+			Name:  "CLOTHO_NATS_URL",
+			Value: natsURL,
 		})
 	}
 
