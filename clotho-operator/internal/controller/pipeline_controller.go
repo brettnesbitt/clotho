@@ -159,7 +159,18 @@ func (r *PipelineReconciler) validateConfig(ctx context.Context, p *clothov1alph
 func (r *PipelineReconciler) constructSpinApp(p *clothov1alpha1.Pipeline) *spinva1.SpinApp {
 	// 1. Map Configuration -> SpinKube Variables
 	// CORRECT TYPE: []spinva1.SpinVar
-	vars := []spinva1.SpinVar{}
+	vars := []spinva1.SpinVar{
+		{Name: "CLOTHO_PIPELINE_ID", Value: p.Name},
+		// Inject node IP so SDK telemetry (HTTP) reaches the agent DaemonSet on hostNetwork
+		{
+			Name: "CLOTHO_AGENT_HOST",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "status.hostIP",
+				},
+			},
+		},
+	}
 
 	for _, cfg := range p.Spec.Config {
 		v := spinva1.SpinVar{

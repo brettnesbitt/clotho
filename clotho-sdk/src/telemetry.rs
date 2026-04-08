@@ -3,8 +3,18 @@ use std::net::UdpSocket;
 use std::sync::{OnceLock, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-const AGENT_ADDR: &str = "127.0.0.1:8125";
+const AGENT_UDP_PORT: u16 = 8125;
 const AGENT_HTTP_PORT: u16 = 8126;
+
+fn agent_addr() -> String {
+    let host = std::env::var("CLOTHO_AGENT_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    format!("{}:{}", host, AGENT_UDP_PORT)
+}
+
+fn agent_http_addr() -> String {
+    let host = std::env::var("CLOTHO_AGENT_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    format!("http://{}:{}", host, AGENT_HTTP_PORT)
+}
 
 /// Execution report collected by pipeline runners, read by the macro.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -17,6 +27,7 @@ pub struct ExecutionReport {
     pub records_in: u64,
     pub records_out: u64,
     pub records_failed: u64,
+    pub records_branched: u64,
     pub bytes_processed: u64,
     pub log_lines: Vec<String>,
 }
@@ -48,7 +59,7 @@ pub fn execution_report_json() -> Option<Vec<u8>> {
 /// Called by the #[clotho::daemon] macro at process startup.
 pub fn init_native_agent() {
     mark_birth();
-    eprintln!("[Clotho Telemetry] Native agent initialized (UDP -> {})", AGENT_ADDR);
+    eprintln!("[Clotho Telemetry] Native agent initialized (UDP -> {})", agent_addr());
 }
 
 // 1. The Global Stopwatch
@@ -134,9 +145,10 @@ pub fn emit_lifecycle_with_runtime(pipeline_id: &str, event: &str, boot_ms: Opti
         },
     };
 
+    let addr = agent_addr();
     if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
         if let Ok(data) = serde_json::to_vec(&envelope) {
-            let _ = socket.send_to(&data, AGENT_ADDR);
+            let _ = socket.send_to(&data, &addr);
         }
     }
 }
@@ -159,6 +171,7 @@ struct ThroughputPayload {
     records_in: u64,
     records_out: u64,
     records_failed: u64,
+    records_branched: u64,
     bytes_processed: u64,
     timestamp: u64,
 }
@@ -174,6 +187,11 @@ struct ThroughputEvent {
 /// Emit throughput metrics to the Clotho Agent.
 /// Called by the SDK pipeline loop to report records flowing through the pipeline.
 pub fn emit_throughput(pipeline_id: &str, records_in: u64, records_out: u64, records_failed: u64, bytes_processed: u64) {
+    emit_throughput_with_branched(pipeline_id, records_in, records_out, records_failed, 0, bytes_processed);
+}
+
+/// Emit throughput metrics including branched records.
+pub fn emit_throughput_with_branched(pipeline_id: &str, records_in: u64, records_out: u64, records_failed: u64, records_branched: u64, bytes_processed: u64) {
     let event = ThroughputEvent {
         event_type: "Throughput".to_string(),
         payload: ThroughputPayload {
@@ -181,14 +199,16 @@ pub fn emit_throughput(pipeline_id: &str, records_in: u64, records_out: u64, rec
             records_in,
             records_out,
             records_failed,
+            records_branched,
             bytes_processed,
             timestamp: now_secs(),
         },
     };
 
+    let addr = agent_addr();
     if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
         if let Ok(data) = serde_json::to_vec(&event) {
-            let _ = socket.send_to(&data, AGENT_ADDR);
+            let _ = socket.send_to(&data, &addr);
         }
     }
 }
@@ -238,9 +258,10 @@ pub fn emit_dlq_record(pipeline_id: &str, trace_id: &str, step: &str, error: &st
         },
     };
 
+    let addr = agent_addr();
     if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
         if let Ok(data) = serde_json::to_vec(&event) {
-            let _ = socket.send_to(&data, AGENT_ADDR);
+            let _ = socket.send_to(&data, &addr);
         }
     }
     // Silent fail — never crash the pipeline because the dashboard is down
@@ -289,9 +310,10 @@ pub fn emit_data_quality(pipeline_id: &str, rule: &str, status: crate::types::Co
         },
     };
 
+    let addr = agent_addr();
     if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
         if let Ok(data) = serde_json::to_vec(&event) {
-            let _ = socket.send_to(&data, AGENT_ADDR);
+            let _ = socket.send_to(&data, &addr);
         }
     }
 }

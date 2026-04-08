@@ -219,6 +219,7 @@ where S: Source<DataFrame> + 'static
             records_in,
             records_out,
             records_failed,
+            records_branched: 0,
             bytes_processed,
             log_lines: vec![],
         });

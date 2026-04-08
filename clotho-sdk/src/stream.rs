@@ -271,7 +271,7 @@ where
             batch_counter += 1;
             if batch_counter >= 100 {
                 eprintln!("[Clotho] Progress: {} in, {} out, {} branched, {} failed", records_in, records_out, records_branched, records_failed);
-                telemetry::emit_throughput(&pipeline_id, records_in, records_out, records_failed, bytes_processed);
+                telemetry::emit_throughput_with_branched(&pipeline_id, records_in, records_out, records_failed, records_branched, bytes_processed);
                 batch_counter = 0;
             }
         }
@@ -282,7 +282,7 @@ where
         let runtime_ms = (runtime_micros + 999) / 1000; // Round up to nearest ms, minimum 1ms
         eprintln!("[Clotho] Pipeline End: {} records in, {} records out, {} branched, {} failed ({}µs / {}ms)", 
                   records_in, records_out, records_branched, records_failed, runtime_micros, runtime_ms);
-        telemetry::emit_throughput(&pipeline_id, records_in, records_out, records_failed, bytes_processed);
+        telemetry::emit_throughput_with_branched(&pipeline_id, records_in, records_out, records_failed, records_branched, bytes_processed);
         telemetry::emit_lifecycle_with_runtime(&pipeline_id, "FINISHED", None, None, Some(runtime_ms));
 
         // Store execution report for the macro to POST via HTTP
@@ -294,6 +294,7 @@ where
             records_in,
             records_out,
             records_failed,
+            records_branched,
             bytes_processed,
             log_lines: vec![],
         });
