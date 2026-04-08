@@ -22,8 +22,7 @@ pub use builtins::{IntervalSource, MemorySink, MemorySource, memory_channel};
 // Re-export bus types for DAG pipelines
 pub use bus::{BusSource, BusSink, BusConfig, bus_source, bus_sink};
 
-// Only compile Batch engine if requested
-#[cfg(feature = "batch")]
+// Batch engine (Polars DataFrame)
 pub mod batch;
 
 pub use traits::{Source, Sink};
@@ -46,9 +45,8 @@ impl Pipeline {
 
     /// Create a High-Throughput, Columnar pipeline (Polars).
     /// Best for: ETL, Analytics, S3 Archiving, Database Sync.
-    #[cfg(feature = "batch")]
     pub fn batch<S>(source: S) -> batch::BatchPipeline<S> 
-    where S: Source<polars::prelude::DataFrame> {
+    where S: Source<polars::prelude::DataFrame> + 'static {
         batch::BatchPipeline::new(source)
     }
 

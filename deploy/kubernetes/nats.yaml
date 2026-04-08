@@ -40,6 +40,8 @@ spec:
             - "-js"
             - "-sd"
             - "/data/jetstream"
+            - "-m"
+            - "8222"
           ports:
             - containerPort: 4222
               name: client

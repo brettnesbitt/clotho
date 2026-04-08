@@ -1,5 +1,5 @@
 use crate::traits::{Sink, Context};
-use anyhow::Result;
+use anyhow::{Result, Context as AnyhowContext};
 use async_trait::async_trait;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -31,10 +31,9 @@ use futures_util::StreamExt;
 #[cfg(feature = "native")]
 use tokio::sync::Mutex;
 
-#[cfg(feature = "batch")]
 use crate::traits::LookupTarget;
-#[cfg(feature = "batch")]
-use polars::prelude::*;
+use polars::prelude::DataFrame;
+use polars::prelude::{SerReader, SerWriter};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 1. MONGO LOOKUP (Enrichment Target)
@@ -98,8 +97,8 @@ impl MongoLookup {
     }
 }
 
-// ── Batch LookupTarget (native only — batch feature requires native) ─────────
-#[cfg(all(feature = "batch", not(target_family = "wasm")))]
+// ── Batch LookupTarget (native only) ─────────
+#[cfg(not(target_family = "wasm"))]
 #[async_trait]
 impl LookupTarget for MongoLookup {
     async fn lookup_batch(&self, keys: Vec<&str>) -> Result<DataFrame> {
@@ -107,10 +106,11 @@ impl LookupTarget for MongoLookup {
             return Ok(DataFrame::default());
         }
 
+        let keys_owned: Vec<String> = keys.iter().map(|s| s.to_string()).collect();
         let mut active_pipeline = vec![
             bson::doc! {
                 "$match": {
-                    &self.lookup_field: { "$in": keys }
+                    &self.lookup_field: { "$in": keys_owned }
                 }
             }
         ];
@@ -121,7 +121,7 @@ impl LookupTarget for MongoLookup {
 
         while let Some(result) = cursor.next().await {
             let doc = result.context("Failed to read Mongo document")?;
-            let json: serde_json::Value = doc.into();
+            let json: serde_json::Value = serde_json::to_value(&doc)?;
             serde_json::to_writer(&mut buffer, &json)?;
             buffer.push(b'\n');
         }
@@ -131,8 +131,8 @@ impl LookupTarget for MongoLookup {
         }
 
         let io_cursor = std::io::Cursor::new(buffer);
-        let df = polars::io::ndjson::JsonLineReader::new(io_cursor)
-            .infer_schema_len(Some(100))
+        let df: DataFrame = polars::io::json::JsonReader::new(io_cursor)
+            .infer_schema_len(std::num::NonZeroUsize::new(100))
             .finish()
             .context("Failed to parse Mongo results into Polars DataFrame")?;
 
@@ -201,7 +201,7 @@ impl Source<serde_json::Value> for MongoSource {
     }
 }
 
-#[cfg(all(feature = "batch", not(target_family = "wasm")))]
+#[cfg(feature = "native")]
 #[async_trait]
 impl Source<DataFrame> for MongoSource {
     async fn next(&mut self) -> Option<Result<Context<DataFrame>>> {
@@ -214,7 +214,10 @@ impl Source<DataFrame> for MongoSource {
         let mut count = 0;
 
         while let Some(Ok(doc)) = cursor.next().await {
-            let json: serde_json::Value = doc.into();
+            let json: serde_json::Value = match serde_json::to_value(&doc) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(anyhow::anyhow!("JSON serialization error: {}", e))),
+            };
             let _ = serde_json::to_writer(&mut buffer, &json);
             buffer.push(b'\n');
             count += 1;
@@ -224,7 +227,8 @@ impl Source<DataFrame> for MongoSource {
         if count == 0 { return None; }
 
         let io_cursor = std::io::Cursor::new(buffer);
-        match polars::io::ndjson::JsonLineReader::new(io_cursor).finish() {
+        let reader: polars::io::json::JsonReader<_> = SerReader::new(io_cursor);
+        match reader.finish() {
             Ok(df) => Some(Ok(Context::root(df, "mongo_batch"))),
             Err(e) => Some(Err(anyhow::anyhow!("Polars parsing error: {}", e))),
         }
@@ -399,15 +403,15 @@ impl Sink<Vec<serde_json::Value>> for MongoSink {
 
 // ── Sink<DataFrame> — batch engine (native only) ────────────────────────────
 
-#[cfg(all(feature = "batch", not(target_family = "wasm")))]
+#[cfg(not(target_family = "wasm"))]
 #[async_trait]
 impl Sink<DataFrame> for MongoSink {
     async fn write(&mut self, mut ctx: Context<DataFrame>) -> Result<()> {
         if ctx.data.height() == 0 { return Ok(()); }
 
         let mut buffer = Vec::with_capacity(ctx.data.height() * 256);
-        polars::io::ndjson::JsonWriter::new(&mut buffer)
-            .finish(&mut ctx.data)?;
+        let mut writer: polars::io::json::JsonWriter<_> = SerWriter::new(&mut buffer);
+        writer.finish(&mut ctx.data)?;
 
         let mut docs_to_insert = Vec::with_capacity(ctx.data.height());
         for line in buffer.split(|&b| b == b'\n') {
