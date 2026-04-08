@@ -1,0 +1,20 @@
+---
+# Production namespace — live pipeline workloads
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: clotho-prod
+  labels:
+    app.kubernetes.io/part-of: clotho
+    clotho.run/environment: production
+
+---
+# Preview namespace — ephemeral test builds and staging pipelines
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: clotho-preview
+  labels:
+    app.kubernetes.io/part-of: clotho
+    clotho.run/environment: preview
+

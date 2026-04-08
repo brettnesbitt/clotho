@@ -9,7 +9,6 @@ path = "src/lib.rs"
 
 [features]
 default = []
-batch = ["dep:polars", "dep:arrow"]
 native = ["dep:tokio", "dep:tokio-tungstenite"]
 
 [dependencies]
@@ -23,6 +22,10 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 # Serialization (works on both Spin/WASM and native)
 bson = "2.11"
 futures-util = "0.3"
+lazy_static = "1.4"
+
+# Batch Engine (Polars DataFrame) — always available
+polars = { version = "0.44", features = ["lazy", "json"] }
 
 # Optional: only needed for native (non-Spin) runtimes
 tokio = { version = "1.0", features = ["sync", "macros", "io-util", "rt", "rt-multi-thread", "time", "net", "signal"], optional = true }
@@ -32,10 +35,7 @@ tokio-tungstenite = { version = "0.21", features = ["native-tls"], optional = tr
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 mongodb = "2.8"
 reqwest = { version = "0.11", features = ["json"] }
+async-nats = "0.38"
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 spin-sdk = { version = "3.1" }
-
-# Optional dependencies for Batch Engine
-polars = { version = "0.36", features = ["lazy", "ndarray", "simd"], optional = true }
-arrow = { version = "50.0", optional = true }

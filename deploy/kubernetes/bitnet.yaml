@@ -1,0 +1,70 @@
+---
+# BitNet 1-bit LLM — lightweight on-cluster inference for Clotho pipelines
+# Image: ghcr.io/kth8/llama-server (llama.cpp server + bundled model)
+# Model: IBM Granite 4.0 350M (OpenAI-compatible API on port 8080)
+# Internal DNS: http://bitnet.clotho-prod.svc.cluster.local:8080
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bitnet
+  namespace: clotho-prod
+  labels:
+    app: bitnet
+    plane: inference
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bitnet
+  template:
+    metadata:
+      labels:
+        app: bitnet
+    spec:
+      containers:
+        - name: bitnet
+          image: ghcr.io/kth8/llama-server:granite-4.0-350m
+          ports:
+            - containerPort: 8080
+              name: http
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1536Mi"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+
+---
+# ClusterIP Service — accessible from any namespace via:
+#   http://bitnet.clotho-prod.svc.cluster.local:8080
+apiVersion: v1
+kind: Service
+metadata:
+  name: bitnet
+  namespace: clotho-prod
+  labels:
+    app: bitnet
+    plane: inference
+spec:
+  selector:
+    app: bitnet
+  ports:
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
+      name: http

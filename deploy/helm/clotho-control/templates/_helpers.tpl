@@ -11,3 +11,11 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- define "clotho-control.apiImage" -}}
 {{ .Values.registry }}/{{ .Values.api.image }}:{{ .Values.api.tag }}
 {{- end }}
+
+{{- define "clotho-control.dataProxyImage" -}}
+{{ .Values.registry }}/{{ .Values.dataProxy.image }}:{{ .Values.dataProxy.tag }}
+{{- end }}
+
+{{- define "clotho-control.uiImage" -}}
+{{ .Values.registry }}/{{ .Values.ui.image }}:{{ .Values.ui.tag }}
+{{- end }}

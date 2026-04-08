@@ -159,7 +159,18 @@ func (r *PipelineReconciler) validateConfig(ctx context.Context, p *clothov1alph
 func (r *PipelineReconciler) constructSpinApp(p *clothov1alpha1.Pipeline) *spinva1.SpinApp {
 	// 1. Map Configuration -> SpinKube Variables
 	// CORRECT TYPE: []spinva1.SpinVar
-	vars := []spinva1.SpinVar{}
+	vars := []spinva1.SpinVar{
+		{Name: "CLOTHO_PIPELINE_ID", Value: p.Name},
+		// Inject node IP so SDK telemetry (HTTP) reaches the agent DaemonSet on hostNetwork
+		{
+			Name: "CLOTHO_AGENT_HOST",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "status.hostIP",
+				},
+			},
+		},
+	}
 
 	for _, cfg := range p.Spec.Config {
 		v := spinva1.SpinVar{
@@ -441,14 +452,15 @@ func (r *PipelineReconciler) reconcileBuild(ctx context.Context, pipeline *cloth
 							pipeline.Spec.Reference,
 							targetImage,
 							pipeline.Spec.Path,
+							string(pipeline.Spec.Runtime),
 						},
 						Env: r.buildEnvVars(pipeline),
 						Resources: corev1.ResourceRequirements{
 							Requests: corev1.ResourceList{
-								corev1.ResourceMemory: resource.MustParse("256Mi"),
+								corev1.ResourceMemory: resource.MustParse("1Gi"),
 							},
 							Limits: corev1.ResourceList{
-								corev1.ResourceMemory: resource.MustParse("2560Mi"),
+								corev1.ResourceMemory: resource.MustParse("4Gi"),
 							},
 						},
 						VolumeMounts: []corev1.VolumeMount{
@@ -531,6 +543,19 @@ func (r *PipelineReconciler) buildEnvVars(pipeline *clothov1alpha1.Pipeline) []c
 			},
 		},
 	})
+
+	// For native pipelines, provide the Clotho SDK repo URL so the builder
+	// can clone it alongside the source (path dependency resolution).
+	if pipeline.Spec.Runtime == clothov1alpha1.PipelineRuntimeNative {
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  "CLOTHO_SDK_REPO",
+			Value: "https://github.com/brettnesbitt/clotho.git",
+		})
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  "CLOTHO_SDK_REF",
+			Value: "clotho-ide",
+		})
+	}
 
 	return envVars
 }
@@ -728,15 +753,24 @@ func (r *PipelineReconciler) reconcileStage(ctx context.Context, pipeline *cloth
 		Value: stage.Entrypoint,
 	})
 
+	// Build a set of config var names already defined by the user in stage config
+	userDefinedVars := make(map[string]bool)
+	for _, cfg := range stage.Config {
+		userDefinedVars[cfg.Name] = true
+	}
+
 	// Add bus configuration for inter-stage communication
 	if len(stage.DependsOn) > 0 {
-		// This stage reads from upstream stages
+		// This stage reads from upstream stages (only inject if not user-defined)
 		for _, dep := range stage.DependsOn {
-			busName := fmt.Sprintf("%s-%s-out", pipeline.Name, dep)
-			config = append(config, clothov1alpha1.ConfigVar{
-				Name:  fmt.Sprintf("CLOTHO_BUS_%s", strings.ToUpper(dep)),
-				Value: busName,
-			})
+			envName := fmt.Sprintf("CLOTHO_BUS_%s", strings.ToUpper(dep))
+			if !userDefinedVars[envName] {
+				busName := fmt.Sprintf("%s-%s-out", pipeline.Name, dep)
+				config = append(config, clothov1alpha1.ConfigVar{
+					Name:  envName,
+					Value: busName,
+				})
+			}
 		}
 	}
 
@@ -754,12 +788,22 @@ func (r *PipelineReconciler) reconcileStage(ctx context.Context, pipeline *cloth
 		}
 	}
 
-	if hasDownstream {
-		// This stage writes to a bus for downstream stages
+	if hasDownstream && !userDefinedVars["CLOTHO_BUS_OUT"] {
+		// This stage writes to a bus for downstream stages (only inject if not user-defined)
 		busName := fmt.Sprintf("%s-%s-out", pipeline.Name, stage.Name)
 		config = append(config, clothov1alpha1.ConfigVar{
 			Name:  "CLOTHO_BUS_OUT",
 			Value: busName,
+		})
+	}
+
+	// Inject NATS URL from messageBus.clusterRef for inter-stage communication
+	if pipeline.Spec.MessageBus != nil && pipeline.Spec.MessageBus.ClusterRef != "" && !userDefinedVars["CLOTHO_NATS_URL"] {
+		natsURL := fmt.Sprintf("nats://%s.%s.svc.cluster.local:4222",
+			pipeline.Spec.MessageBus.ClusterRef, "clotho-system")
+		config = append(config, clothov1alpha1.ConfigVar{
+			Name:  "CLOTHO_NATS_URL",
+			Value: natsURL,
 		})
 	}
 
@@ -791,6 +835,11 @@ func (r *PipelineReconciler) reconcileStage(ctx context.Context, pipeline *cloth
 			},
 			Spec: stageSpec,
 		})
+		// Override the container command to run the specific stage binary.
+		// The crane-built image places all binaries under /app/.
+		if stage.Entrypoint != "" && len(deploy.Spec.Template.Spec.Containers) > 0 {
+			deploy.Spec.Template.Spec.Containers[0].Command = []string{fmt.Sprintf("/app/%s", stage.Entrypoint)}
+		}
 		// Owner reference to the REAL parent pipeline (has a UID)
 		if err := ctrl.SetControllerReference(pipeline, deploy, r.Scheme); err != nil {
 			return err

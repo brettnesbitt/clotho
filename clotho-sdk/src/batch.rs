@@ -2,7 +2,8 @@
 use crate::traits::{Source, Sink, LookupTarget};
 use crate::types::{Context, ContractStatus};
 use crate::telemetry;
-use polars::prelude::*;
+use polars::prelude::{DataFrame, LazyFrame, Series, IntoLazy, JoinType, JoinArgs};
+use polars::lazy::dsl::col;
 use anyhow::Result;
 use std::marker::PhantomData;
 use std::future::Future;
@@ -30,7 +31,7 @@ where S: Source<DataFrame> + 'static
 
     /// Pure Logic: Synchronous Polars Expressions
     pub fn map<F>(mut self, op: F) -> Self
-    where F: Fn(LazyFrame) -> LazyFrame + Send + Sync + 'static
+    where F: Fn(LazyFrame) -> LazyFrame + Send + Sync + Clone + 'static
     {
         self.transforms.push(Box::new(move |lf: LazyFrame| {
             let result = op(lf);
@@ -43,14 +44,14 @@ where S: Source<DataFrame> + 'static
     /// Note: This forces eager evaluation (.collect()) before running the async user code.
     pub fn map_async<F, Fut>(mut self, op: F) -> Self 
     where 
-        F: Fn(DataFrame) -> Fut + Send + Sync + 'static,
+        F: Fn(DataFrame) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future<Output = Result<DataFrame>> + Send + 'static
     {
         self.transforms.push(Box::new(move |lf: LazyFrame| {
-            let op_ref = &op; // Need to handle lifetimes safely in real impl, simplified here
+            let op = op.clone();
             Box::pin(async move {
-                let eager_df = lf.collect()?;
-                let new_df = op(eager_df).await?;
+                let eager_df: DataFrame = lf.collect()?;
+                let new_df: DataFrame = op(eager_df).await?;
                 Ok(new_df.lazy())
             })
         }));
@@ -58,8 +59,8 @@ where S: Source<DataFrame> + 'static
     }
 
     /// The "Golden Path" macro for Data Loading / Joining
-    pub fn enrich<L>(mut self, lookup: L, join_col: &str, mode: JoinMode) -> Self 
-    where L: LookupTarget + Send + Sync + 'static 
+    pub fn enrich<L>(mut self, lookup: L, join_col: &str, mode: JoinType) -> Self 
+    where L: LookupTarget + Send + Sync + Clone + 'static 
     {
         let col_name = join_col.to_string();
         
@@ -67,25 +68,34 @@ where S: Source<DataFrame> + 'static
             let col_name = col_name.clone();
             // We assume lookup is cheap to clone (e.g., an Arc'd connection pool)
             let lookup_clone = lookup.clone(); 
+            let join_type = mode.clone();
             
             Box::pin(async move {
                 let df = lf.collect()?;
                 
                 // 1. Extract keys from the incoming batch
-                let keys: Vec<&str> = df.column(&col_name)?.utf8()?.into_no_null_iter().collect();
+                let keys: Vec<String> = df.column(&col_name)?
+                    .as_materialized_series()
+                    .str()
+                    .unwrap()
+                    .into_no_null_iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                let key_refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
                 
                 // 2. Bulk fetch from external DB
-                let enrichment_df = lookup_clone.lookup_batch(keys).await?;
+                let enrichment_df: DataFrame = lookup_clone.lookup_batch(key_refs).await?;
                 
                 // 3. Polars native vectorized join
                 let lazy_df = df.lazy();
                 let lazy_enrich = enrichment_df.lazy();
                 
-                let joined_df = match mode {
-                    JoinMode::Inner => lazy_df.inner_join(lazy_enrich, col(&col_name), col(&col_name)),
-                    JoinMode::Left => lazy_df.left_join(lazy_enrich, col(&col_name), col(&col_name)),
-                    JoinMode::Outer => lazy_df.outer_join(lazy_enrich, col(&col_name), col(&col_name)),
-                };
+                let joined_df = lazy_df.join(
+                    lazy_enrich,
+                    &[col(&col_name)],
+                    &[col(&col_name)],
+                    JoinArgs::new(join_type),
+                );
                 
                 Ok(joined_df)
             })
@@ -95,12 +105,13 @@ where S: Source<DataFrame> + 'static
 
     /// Data Contract Validation
     pub fn expect<F>(mut self, rule_name: &str, check: F) -> Self 
-    where F: Fn(&DataFrame) -> ContractStatus + Send + Sync + 'static 
+    where F: Fn(&DataFrame) -> ContractStatus + Send + Sync + Clone + 'static 
     {
         let rule = rule_name.to_string();
 
         self.transforms.push(Box::new(move |lf: LazyFrame| {
             let rule = rule.clone();
+            let check = check.clone();
             Box::pin(async move {
                 let df = lf.collect().unwrap_or_else(|_| DataFrame::default());
                 let status = check(&df);
@@ -174,7 +185,7 @@ where S: Source<DataFrame> + 'static
                     if let Some(lf) = current_lf {
                         match lf.collect() {
                             Ok(df) => {
-                                let out_rows = df.height() as u64;
+                                let out_rows: u64 = df.height() as u64;
                                 records_out += out_rows;
                                 let sink_ctx = Context::root(df, &format!("batch-{}", batch_count));
                                 if let Err(e) = sink.write(sink_ctx).await {
@@ -219,6 +230,7 @@ where S: Source<DataFrame> + 'static
             records_in,
             records_out,
             records_failed,
+            records_branched: 0,
             bytes_processed,
             log_lines: vec![],
         });

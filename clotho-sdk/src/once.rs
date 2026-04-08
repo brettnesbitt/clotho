@@ -121,6 +121,7 @@ where T: Send + Sync + 'static
             records_in: 1,
             records_out: 1,
             records_failed: 0,
+            records_branched: 0,
             bytes_processed: 0,
             log_lines: vec![],
         });

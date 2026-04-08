@@ -4,9 +4,54 @@ use crate::telemetry;
 use anyhow::Result;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
+
+// Internal sentinel values for non-error pipeline control flow.
+// These are returned as Err() from transforms but are NOT failures —
+// the engine intercepts them to implement filter/branch semantics.
+const BRANCH_SENTINEL: &str = "__clotho_branched__";
+const FILTER_SENTINEL: &str = "__clotho_filtered__";
+
+fn is_control_flow(e: &anyhow::Error) -> bool {
+    let msg = e.to_string();
+    msg == BRANCH_SENTINEL || msg == FILTER_SENTINEL
+}
 
 // The Error now hands ownership of the Context back to the engine!
 type AsyncTransformFn<T> = Box<dyn Fn(Context<T>) -> Pin<Box<dyn Future<Output = Result<Context<T>, (anyhow::Error, Context<T>)>> + Send>> + Send + Sync>;
+
+/// Free function so the compiler sees T: Clone in its own generic scope.
+/// (Rust can't propagate a method-level Clone bound into a closure that gets
+/// type-erased to AsyncTransformFn<T> whose T only has Send+Sync.)
+fn make_branch_transform<T, F, K>(predicate: F, sink: K) -> AsyncTransformFn<T>
+where
+    T: Send + Sync + Clone + 'static,
+    F: Fn(&T) -> bool + Send + Sync + 'static,
+    K: Sink<T> + 'static,
+{
+    let sink = Arc::new(tokio::sync::Mutex::new(sink));
+    Box::new(move |ctx: Context<T>| {
+        let matches = predicate(&ctx.data);
+        let sink = Arc::clone(&sink);
+        Box::pin(async move {
+            if matches {
+                let branch_ctx = Context {
+                    data: ctx.data.clone(),
+                    span_id: ctx.span_id.clone(),
+                    parents: ctx.parents.clone(),
+                    meta: ctx.meta.clone(),
+                };
+                let mut sink = sink.lock().await;
+                if let Err(e) = sink.write(branch_ctx).await {
+                    eprintln!("[Clotho] Branch sink write failed: {}", e);
+                }
+                Err((anyhow::anyhow!(BRANCH_SENTINEL), ctx))
+            } else {
+                Ok(ctx)
+            }
+        })
+    })
+}
 
 pub struct StreamPipeline<S, T> {
     source: S,
@@ -37,6 +82,38 @@ where
         T: Clone, // Required for tee since we need to pass data to both sink and next stage
     {
         self.tee_sinks.push(Box::new(sink));
+        self
+    }
+
+    /// Filter: records matching the predicate continue through the pipeline.
+    /// Non-matching records are silently dropped — no DLQ, no error.
+    pub fn filter<F>(mut self, predicate: F) -> Self
+    where F: Fn(&T) -> bool + Send + Sync + 'static
+    {
+        self.transforms.push(Box::new(move |ctx: Context<T>| {
+            let keep = predicate(&ctx.data);
+            Box::pin(async move {
+                if keep {
+                    Ok(ctx)
+                } else {
+                    Err((anyhow::anyhow!(FILTER_SENTINEL), ctx))
+                }
+            })
+        }));
+        self
+    }
+
+    /// Conditional Branch: records matching the predicate are routed to the
+    /// branch sink and removed from the main pipeline. Records not matching
+    /// continue through the remaining transforms to the main sink.
+    /// This is the selective version of tee() — only matching records are forked.
+    pub fn branch<F, K>(mut self, predicate: F, sink: K) -> Self
+    where
+        F: Fn(&T) -> bool + Send + Sync + 'static,
+        K: Sink<T> + 'static,
+        T: Clone,
+    {
+        self.transforms.push(make_branch_transform(predicate, sink));
         self
     }
 
@@ -77,7 +154,7 @@ where
     pub async fn run<K>(mut self, mut sink: K) -> Result<()> 
     where 
         K: Sink<T>,
-        T: serde::Serialize // Required for DLQ serialization. Notice: Clone is NO LONGER required!
+        T: serde::Serialize + Clone
     {
         let pipeline_id = std::env::var("PIPELINE_ID")
             .or_else(|_| std::env::var("CLOTHO_PIPELINE_ID"))
@@ -94,6 +171,7 @@ where
         let mut records_in: u64 = 0;
         let mut records_out: u64 = 0;
         let mut records_failed: u64 = 0;
+        let mut records_branched: u64 = 0;
         let mut bytes_processed: u64 = 0;
         let mut batch_counter: u64 = 0;
         let mut first_record = true;
@@ -127,6 +205,13 @@ where
                         match op(ctx_to_process).await {
                             Ok(new_ctx) => current = Some(new_ctx),
                             Err((e, failed_ctx)) => {
+                                if is_control_flow(&e) {
+                                    // Record was branched or filtered — not a failure.
+                                    // It was either routed to a branch sink or silently dropped.
+                                    records_branched += 1;
+                                    current = None;
+                                    break;
+                                }
                                 // We got the context back from the failed transform!
                                 records_failed += 1;
                                 let error_msg = e.to_string();
@@ -185,8 +270,8 @@ where
             // Emit throughput every 100 records
             batch_counter += 1;
             if batch_counter >= 100 {
-                eprintln!("[Clotho] Progress: {} in, {} out, {} failed", records_in, records_out, records_failed);
-                telemetry::emit_throughput(&pipeline_id, records_in, records_out, records_failed, bytes_processed);
+                eprintln!("[Clotho] Progress: {} in, {} out, {} branched, {} failed", records_in, records_out, records_branched, records_failed);
+                telemetry::emit_throughput_with_branched(&pipeline_id, records_in, records_out, records_failed, records_branched, bytes_processed);
                 batch_counter = 0;
             }
         }
@@ -195,9 +280,9 @@ where
         let elapsed = start_time.elapsed();
         let runtime_micros = elapsed.as_micros() as u64;
         let runtime_ms = (runtime_micros + 999) / 1000; // Round up to nearest ms, minimum 1ms
-        eprintln!("[Clotho] Pipeline End: {} records in, {} records out, {} failed ({}µs / {}ms)", 
-                  records_in, records_out, records_failed, runtime_micros, runtime_ms);
-        telemetry::emit_throughput(&pipeline_id, records_in, records_out, records_failed, bytes_processed);
+        eprintln!("[Clotho] Pipeline End: {} records in, {} records out, {} branched, {} failed ({}µs / {}ms)", 
+                  records_in, records_out, records_branched, records_failed, runtime_micros, runtime_ms);
+        telemetry::emit_throughput_with_branched(&pipeline_id, records_in, records_out, records_failed, records_branched, bytes_processed);
         telemetry::emit_lifecycle_with_runtime(&pipeline_id, "FINISHED", None, None, Some(runtime_ms));
 
         // Store execution report for the macro to POST via HTTP
@@ -209,6 +294,7 @@ where
             records_in,
             records_out,
             records_failed,
+            records_branched,
             bytes_processed,
             log_lines: vec![],
         });

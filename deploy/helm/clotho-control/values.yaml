@@ -1,16 +1,55 @@
 # Clotho Control Plane Helm Values
-# This chart deploys the Control Plane: API + UI + embedded telemetry DB.
+# This chart deploys the Control Plane: API + UI + MongoDB data layer.
 # For Enterprise air-gapped deployments or local development.
 # SaaS customers do NOT need this chart - Clotho hosts the Control Plane for them.
+#
+# One-line install:
+#   helm install clotho-control ./deploy/helm/clotho-control \
+#     --namespace clotho-control --create-namespace \
+#     --set mongo.uri="mongodb://user:pass@mongo-host:27017"
 
 # -- Namespace for control plane components
 namespace: clotho-control
 
-# -- Namespace where pipelines run (for K8s API reads)
-pipelineNamespace: default
+# -- Environment → Namespace mapping
+# Each environment maps to a K8s namespace where pipelines run.
+environments:
+  production:
+    namespace: clotho-prod
+  preview:
+    namespace: clotho-preview
 
 # -- Container Registry
 registry: us-central1-docker.pkg.dev/quotopia-391900/clotho
+
+# -- MongoDB Configuration
+# Use an existing MongoDB instance or deploy one separately.
+# The connection string is stored as a K8s Secret.
+mongo:
+  # MongoDB connection string (required)
+  # Can be set via --set mongo.uri="..." or via existingSecret
+  uri: ""
+  # Reference an existing Secret containing the MongoDB URI
+  # The secret must have a key named "uri"
+  existingSecret: ""
+  # Database name within MongoDB
+  database: clotho
+
+# -- Clotho Data Proxy (Deployment + Service)
+# MongoDB-backed data layer that replaces SQLite
+dataProxy:
+  enabled: true
+  image: clotho-data-proxy
+  tag: latest
+  replicas: 1
+  port: 9090
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
 
 # -- Clotho API (Deployment + Service)
 api:
@@ -25,3 +64,20 @@ api:
     limits:
       cpu: 200m
       memory: 128Mi
+  # URL to the data proxy (internal service)
+  dataProxyUrl: "http://clotho-data-proxy:9090"
+
+# -- Clotho UI (Deployment + Service)
+ui:
+  enabled: true
+  image: clotho-ui
+  tag: latest
+  replicas: 1
+  port: 80
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi

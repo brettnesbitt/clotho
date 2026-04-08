@@ -28,6 +28,9 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["get", "list", "create", "delete"]
@@ -80,8 +83,10 @@ spec:
           ports:
             - containerPort: 3000
           env:
-            - name: CLOTHO_NAMESPACE
-              value: "default"
+            - name: CLOTHO_NS_PRODUCTION
+              value: "clotho-prod"
+            - name: CLOTHO_NS_PREVIEW
+              value: "clotho-preview"
           resources:
             requests:
               cpu: "50m"
