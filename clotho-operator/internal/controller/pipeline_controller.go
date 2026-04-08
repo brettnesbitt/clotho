@@ -439,7 +439,7 @@ func (r *PipelineReconciler) reconcileBuild(ctx context.Context, pipeline *cloth
 		},
 		Spec: batchv1.JobSpec{
 			TTLSecondsAfterFinished: int32Ptr(600),
-			ActiveDeadlineSeconds:   int64Ptr(1800),
+			ActiveDeadlineSeconds:   int64Ptr(3600),
 			BackoffLimit:            int32Ptr(2),
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
