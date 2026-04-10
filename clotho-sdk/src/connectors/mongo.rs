@@ -26,8 +26,9 @@ use bson::Document;
 use crate::traits::Source;
 #[cfg(feature = "native")]
 use mongodb::change_stream::event::ChangeStreamEvent;
-#[cfg(feature = "native")]
+#[cfg(not(target_family = "wasm"))]
 use futures_util::StreamExt;
+use std::num::NonZeroUsize;
 #[cfg(feature = "native")]
 use tokio::sync::Mutex;
 
@@ -119,8 +120,8 @@ impl LookupTarget for MongoLookup {
         let mut cursor = self.collection.aggregate(active_pipeline, None).await?;
         let mut buffer = Vec::with_capacity(keys.len() * 256);
 
-        while let Some(result) = cursor.next().await {
-            let doc = result.context("Failed to read Mongo document")?;
+        while let Some(doc) = cursor.next().await {
+            let doc = doc?;
             let json: serde_json::Value = serde_json::to_value(&doc)?;
             serde_json::to_writer(&mut buffer, &json)?;
             buffer.push(b'\n');
@@ -132,7 +133,7 @@ impl LookupTarget for MongoLookup {
 
         let io_cursor = std::io::Cursor::new(buffer);
         let df: DataFrame = polars::io::json::JsonReader::new(io_cursor)
-            .infer_schema_len(std::num::NonZeroUsize::new(100))
+            .infer_schema_len(Some(NonZeroUsize::new(100).unwrap()))
             .finish()
             .context("Failed to parse Mongo results into Polars DataFrame")?;
 

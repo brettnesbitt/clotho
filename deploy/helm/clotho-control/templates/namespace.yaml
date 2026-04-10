@@ -4,4 +4,4 @@ metadata:
   name: {{ .Values.namespace }}
   labels:
     plane: control
-    {{- include "clotho-control.labels" . | nindent 4 }}
+    {{- include "clotho-system.labels" . | nindent 4 }}

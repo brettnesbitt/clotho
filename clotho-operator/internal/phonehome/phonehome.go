@@ -18,9 +18,9 @@ import (
 )
 
 const (
-	pollInterval     = 10 * time.Second
-	handshakeRetry   = 5 * time.Second
-	httpTimeout      = 10 * time.Second
+	pollInterval   = 10 * time.Second
+	handshakeRetry = 5 * time.Second
+	httpTimeout    = 10 * time.Second
 )
 
 // Client implements manager.Runnable so it can be added to the controller-manager.
@@ -28,7 +28,7 @@ const (
 type Client struct {
 	K8sClient    client.Client
 	Log          logr.Logger
-	ControlPlane string // e.g. "https://api.clotho.io" or "http://clotho-api.clotho-control.svc.cluster.local:3000"
+	ControlPlane string // e.g. "https://api.clotho.io" or "http://clotho-api.clotho-system.svc.cluster.local:3000"
 	APIKey       string // Raw API key from CLOTHO_API_KEY secret
 	ClusterName  string
 }
@@ -105,9 +105,9 @@ type handshakeRequest struct {
 }
 
 type handshakeResponse struct {
-	Status         string `json:"status"`
-	TenantID       string `json:"tenant_id"`
-	PendingCommands int   `json:"pending_commands"`
+	Status          string `json:"status"`
+	TenantID        string `json:"tenant_id"`
+	PendingCommands int    `json:"pending_commands"`
 }
 
 func (c *Client) handshake(ctx context.Context) error {

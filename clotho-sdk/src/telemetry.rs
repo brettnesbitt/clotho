@@ -1,10 +1,28 @@
 use serde::{Serialize, Deserialize};
 use std::net::UdpSocket;
 use std::sync::{OnceLock, Mutex};
+use std::sync::atomic::AtomicU64;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const AGENT_UDP_PORT: u16 = 8125;
 const AGENT_HTTP_PORT: u16 = 8126;
+
+/// Step info for tracking pipeline steps in the DAG
+#[derive(Clone, Debug)]
+pub struct StepInfo {
+    pub name: String,
+    pub step_type: String, // "source", "transform", "filter", "branch", "tee", "sink"
+}
+
+/// Per-step metrics accumulator
+#[derive(Default, Debug)]
+pub struct StepMetrics {
+    pub records_in: AtomicU64,
+    pub records_out: AtomicU64,
+    pub records_filtered: AtomicU64,
+    pub records_branched: AtomicU64,
+    pub records_failed: AtomicU64,
+}
 
 fn agent_addr() -> String {
     let host = std::env::var("CLOTHO_AGENT_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -265,6 +283,69 @@ pub fn emit_dlq_record(pipeline_id: &str, trace_id: &str, step: &str, error: &st
         }
     }
     // Silent fail — never crash the pipeline because the dashboard is down
+}
+
+/// Step metrics payload for tracking individual pipeline step performance
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct StepMetricsPayload {
+    pub pipeline_id: String,
+    pub stage_name: String,
+    pub step_name: String,
+    pub step_type: String, // "source", "transform", "filter", "branch", "tee", "sink"
+    pub records_in: u64,
+    pub records_out: u64,
+    pub records_filtered: u64,
+    pub records_branched: u64,
+    pub records_failed: u64,
+    pub duration_ms: u64,
+    pub timestamp: u64,
+}
+
+/// Tagged telemetry event for step metrics
+#[derive(Serialize)]
+struct StepMetricsEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    payload: StepMetricsPayload,
+}
+
+/// Emit step-level metrics to the Clotho Agent.
+/// Called by the SDK pipeline engine after each step execution.
+pub fn emit_step_metrics(
+    pipeline_id: &str,
+    stage_name: &str,
+    step_name: &str,
+    step_type: &str,
+    records_in: u64,
+    records_out: u64,
+    records_filtered: u64,
+    records_branched: u64,
+    records_failed: u64,
+    duration_ms: u64,
+) {
+    let event = StepMetricsEvent {
+        event_type: "StepMetrics".to_string(),
+        payload: StepMetricsPayload {
+            pipeline_id: pipeline_id.to_string(),
+            stage_name: stage_name.to_string(),
+            step_name: step_name.to_string(),
+            step_type: step_type.to_string(),
+            records_in,
+            records_out,
+            records_filtered,
+            records_branched,
+            records_failed,
+            duration_ms,
+            timestamp: now_secs(),
+        },
+    };
+
+    let addr = agent_addr();
+    if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
+        if let Ok(data) = serde_json::to_vec(&event) {
+            let _ = socket.send_to(&data, &addr);
+        }
+    }
 }
 
 /// Data quality event payload

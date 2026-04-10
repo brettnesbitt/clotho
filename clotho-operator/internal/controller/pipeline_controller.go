@@ -38,7 +38,7 @@ import (
 type PipelineReconciler struct {
 	client.Client
 	Scheme          *runtime.Scheme
-	ControlPlaneURL string // e.g. "http://clotho-api.clotho-control.svc.cluster.local:3000"
+	ControlPlaneURL string // e.g. "http://clotho-api.clotho-system.svc.cluster.local:3000"
 }
 
 // +kubebuilder:rbac:groups=core.clotho.run,resources=pipelines,verbs=get;list;watch;create;update;patch;delete

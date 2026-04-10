@@ -9,6 +9,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
+batch = []
 native = ["dep:tokio", "dep:tokio-tungstenite"]
 
 [dependencies]
