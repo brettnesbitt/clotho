@@ -27,6 +27,7 @@ pub mod batch;
 
 pub use traits::{Source, Sink};
 pub use types::Context;
+pub use telemetry::{StepInfo, StepMetrics};
 pub use anyhow::Result;
 
 /// The Global Builder

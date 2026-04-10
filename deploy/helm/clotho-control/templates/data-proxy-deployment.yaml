@@ -7,7 +7,7 @@ metadata:
   labels:
     app: clotho-data-proxy
     plane: control
-    {{- include "clotho-control.labels" . | nindent 4 }}
+    {{- include "clotho-system.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.dataProxy.replicas }}
   selector:
@@ -21,7 +21,7 @@ spec:
     spec:
       containers:
         - name: data-proxy
-          image: {{ include "clotho-control.dataProxyImage" . }}
+          image: {{ include "clotho-system.dataProxyImage" . }}
           imagePullPolicy: Always
           ports:
             - containerPort: {{ .Values.dataProxy.port }}

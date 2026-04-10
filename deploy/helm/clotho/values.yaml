@@ -7,7 +7,7 @@ namespace: clotho-system
 
 # -- Control Plane URL (Clotho's hosted API)
 # For SaaS: https://api.clotho.io
-# For local dev: http://clotho-api.clotho-control.svc.cluster.local:3000
+# For local dev: http://clotho-api.clotho-system.svc.cluster.local:3000
 # For Enterprise (air-gapped): http://clotho-api.<your-control-ns>.svc.cluster.local:3000
 controlPlaneUrl: "https://api.clotho.io"
 

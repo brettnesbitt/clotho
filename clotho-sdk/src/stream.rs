@@ -1,10 +1,14 @@
 // clotho-sdk/src/stream.rs
 use crate::traits::{Source, Sink, Context};
+use crate::telemetry::{StepInfo, StepMetrics};
 use crate::telemetry;
 use anyhow::Result;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use futures_util::lock::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::HashMap;
 
 // Internal sentinel values for non-error pipeline control flow.
 // These are returned as Err() from transforms but are NOT failures —
@@ -17,7 +21,7 @@ fn is_control_flow(e: &anyhow::Error) -> bool {
     msg == BRANCH_SENTINEL || msg == FILTER_SENTINEL
 }
 
-// The Error now hands ownership of the Context back to the engine!
+// The Error now hands ownership of the context back to the engine!
 type AsyncTransformFn<T> = Box<dyn Fn(Context<T>) -> Pin<Box<dyn Future<Output = Result<Context<T>, (anyhow::Error, Context<T>)>> + Send>> + Send + Sync>;
 
 /// Free function so the compiler sees T: Clone in its own generic scope.
@@ -29,10 +33,10 @@ where
     F: Fn(&T) -> bool + Send + Sync + 'static,
     K: Sink<T> + 'static,
 {
-    let sink = Arc::new(tokio::sync::Mutex::new(sink));
+    let sink: Arc<Mutex<K>> = Arc::new(Mutex::new(sink));
     Box::new(move |ctx: Context<T>| {
         let matches = predicate(&ctx.data);
-        let sink = Arc::clone(&sink);
+        let sink: Arc<Mutex<K>> = Arc::clone(&sink);
         Box::pin(async move {
             if matches {
                 let branch_ctx = Context {
@@ -56,7 +60,11 @@ where
 pub struct StreamPipeline<S, T> {
     source: S,
     transforms: Vec<AsyncTransformFn<T>>,
+    transform_steps: Vec<StepInfo>, // Track step info for each transform
     tee_sinks: Vec<Box<dyn Sink<T>>>,
+    tee_steps: Vec<StepInfo>, // Track step info for each tee
+    step_metrics: HashMap<String, StepMetrics>, // Cumulative metrics per step
+    step_counter: AtomicU64, // For auto-naming steps
 }
 
 impl<S, T> StreamPipeline<S, T> 
@@ -68,8 +76,17 @@ where
         Self { 
             source, 
             transforms: Vec::new(),
+            transform_steps: Vec::new(),
             tee_sinks: Vec::new(),
+            tee_steps: Vec::new(),
+            step_metrics: HashMap::new(),
+            step_counter: AtomicU64::new(0),
         }
+    }
+
+    /// Get the next step index for auto-naming
+    fn next_step_idx(&self) -> u64 {
+        self.step_counter.fetch_add(1, Ordering::SeqCst)
     }
 
     /// Pass-through Sink (Observer Pattern)
@@ -81,7 +98,12 @@ where
         K: Sink<T> + 'static,
         T: Clone, // Required for tee since we need to pass data to both sink and next stage
     {
+        let idx = self.next_step_idx();
         self.tee_sinks.push(Box::new(sink));
+        self.tee_steps.push(StepInfo {
+            name: format!("tee_{}", idx),
+            step_type: "tee".to_string(),
+        });
         self
     }
 
@@ -90,6 +112,7 @@ where
     pub fn filter<F>(mut self, predicate: F) -> Self
     where F: Fn(&T) -> bool + Send + Sync + 'static
     {
+        let idx = self.next_step_idx();
         self.transforms.push(Box::new(move |ctx: Context<T>| {
             let keep = predicate(&ctx.data);
             Box::pin(async move {
@@ -100,6 +123,10 @@ where
                 }
             })
         }));
+        self.transform_steps.push(StepInfo {
+            name: format!("filter_{}", idx),
+            step_type: "filter".to_string(),
+        });
         self
     }
 
@@ -113,7 +140,12 @@ where
         K: Sink<T> + 'static,
         T: Clone,
     {
+        let idx = self.next_step_idx();
         self.transforms.push(make_branch_transform(predicate, sink));
+        self.transform_steps.push(StepInfo {
+            name: format!("branch_{}", idx),
+            step_type: "branch".to_string(),
+        });
         self
     }
 
@@ -123,6 +155,7 @@ where
     pub fn map<F>(mut self, op: F) -> Self 
     where F: Fn(T) -> Result<T, (anyhow::Error, T)> + Send + Sync + 'static 
     {
+        let idx = self.next_step_idx();
         self.transforms.push(Box::new(move |ctx: Context<T>| {
             // Destructure the context to pass just the data
             let Context { data, span_id, parents, meta } = ctx;
@@ -136,6 +169,10 @@ where
                 }
             })
         }));
+        self.transform_steps.push(StepInfo {
+            name: format!("map_{}", idx),
+            step_type: "transform".to_string(),
+        });
         self
     }
 
@@ -145,9 +182,14 @@ where
         F: Fn(Context<T>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Context<T>, (anyhow::Error, Context<T>)>> + Send + 'static
     {
+        let idx = self.next_step_idx();
         self.transforms.push(Box::new(move |ctx| {
             Box::pin(op(ctx))
         }));
+        self.transform_steps.push(StepInfo {
+            name: format!("map_async_{}", idx),
+            step_type: "transform".to_string(),
+        });
         self
     }
 
@@ -199,22 +241,106 @@ where
                     let mut current = Some(initial_ctx);
 
                     // EXECUTE TRANSFORMS (Zero-Copy Ownership Transfer)
-                    for op in &self.transforms {
+                    for (idx, op) in self.transforms.iter().enumerate() {
+                        let step_info = self.transform_steps.get(idx);
+                        let step_name = step_info.map(|s| s.name.as_str()).unwrap_or("unknown");
+                        let step_type = step_info.map(|s| s.step_type.as_str()).unwrap_or("transform");
+                        
+                        let step_start = std::time::Instant::now();
                         let ctx_to_process = current.take().unwrap();
                         
+                        // Update step metrics - record entering this step
+                        if let Some(metrics) = self.step_metrics.get(step_name) {
+                            metrics.records_in.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            let metrics = StepMetrics::default();
+                            metrics.records_in.store(1, Ordering::Relaxed);
+                            self.step_metrics.insert(step_name.to_string(), metrics);
+                        }
+                        
                         match op(ctx_to_process).await {
-                            Ok(new_ctx) => current = Some(new_ctx),
+                            Ok(new_ctx) => {
+                                // Record successfully passed through this step
+                                if let Some(metrics) = self.step_metrics.get(step_name) {
+                                    metrics.records_out.fetch_add(1, Ordering::Relaxed);
+                                }
+                                
+                                // Emit step metrics telemetry
+                                let duration_ms = step_start.elapsed().as_millis() as u64;
+                                telemetry::emit_step_metrics(
+                                    &pipeline_id,
+                                    "", // stage_name - single stage for now
+                                    step_name,
+                                    step_type,
+                                    1, // records_in for this execution
+                                    1, // records_out
+                                    0,
+                                    0,
+                                    0,
+                                    duration_ms,
+                                );
+                                
+                                current = Some(new_ctx);
+                            },
                             Err((e, failed_ctx)) => {
-                                if is_control_flow(&e) {
+                                let is_control = is_control_flow(&e);
+                                let duration_ms = step_start.elapsed().as_millis() as u64;
+                                
+                                if is_control {
                                     // Record was branched or filtered — not a failure.
                                     // It was either routed to a branch sink or silently dropped.
                                     records_branched += 1;
+                                    
+                                    // Update step metrics
+                                    if let Some(metrics) = self.step_metrics.get(step_name) {
+                                        if e.to_string().contains(FILTER_SENTINEL) {
+                                            metrics.records_filtered.fetch_add(1, Ordering::Relaxed);
+                                        } else {
+                                            metrics.records_branched.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                    
+                                    // Emit step metrics telemetry
+                                    telemetry::emit_step_metrics(
+                                        &pipeline_id,
+                                        "",
+                                        step_name,
+                                        step_type,
+                                        1,
+                                        0,
+                                        if e.to_string().contains(FILTER_SENTINEL) { 1 } else { 0 },
+                                        if e.to_string().contains(FILTER_SENTINEL) { 0 } else { 1 },
+                                        0,
+                                        duration_ms,
+                                    );
+                                    
                                     current = None;
                                     break;
                                 }
+                                
                                 // We got the context back from the failed transform!
                                 records_failed += 1;
                                 let error_msg = e.to_string();
+                                
+                                // Update step metrics
+                                if let Some(metrics) = self.step_metrics.get(step_name) {
+                                    metrics.records_failed.fetch_add(1, Ordering::Relaxed);
+                                }
+                                
+                                // Emit step metrics telemetry
+                                telemetry::emit_step_metrics(
+                                    &pipeline_id,
+                                    "",
+                                    step_name,
+                                    step_type,
+                                    1,
+                                    0,
+                                    0,
+                                    0,
+                                    1,
+                                    duration_ms,
+                                );
+                                
                                 eprintln!("[Clotho] Transform failed: {} (record routed to DLQ)", error_msg);
                                 
                                 // Serialize ONLY on the sad path! 
@@ -224,7 +350,7 @@ where
                                 crate::telemetry::emit_dlq_record(
                                     &pipeline_id,
                                     &trace_id,
-                                    "transform",
+                                    step_name,
                                     &error_msg,
                                     &payload_str,
                                 );
@@ -255,7 +381,6 @@ where
                     if let Some(ctx) = current {
                         records_out += 1;
                         if let Err(e) = sink.write(ctx).await {
-                            records_failed += 1;
                             eprintln!("[Clotho] Sink write failed: {}", e);
                             return Err(e);
                         }

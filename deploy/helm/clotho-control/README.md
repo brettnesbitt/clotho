@@ -13,8 +13,8 @@ Deploys the Clotho control plane (API + UI + Data Proxy) backed by MongoDB.
 ### 1. Using an existing MongoDB instance
 
 ```bash
-helm install clotho-control ./deploy/helm/clotho-control \
-  --namespace clotho-control --create-namespace \
+helm install clotho-system ./deploy/helm/clotho-system \
+  --namespace clotho-system --create-namespace \
   --set mongo.uri="mongodb://user:pass@mongo-host:27017"
 ```
 
@@ -24,11 +24,11 @@ helm install clotho-control ./deploy/helm/clotho-control \
 # Create the secret first
 kubectl create secret generic my-mongo-secret \
   --from-literal=uri="mongodb://user:pass@mongo-host:27017" \
-  -n clotho-control
+  -n clotho-system
 
 # Install the chart
-helm install clotho-control ./deploy/helm/clotho-control \
-  --namespace clotho-control --create-namespace \
+helm install clotho-system ./deploy/helm/clotho-system \
+  --namespace clotho-system --create-namespace \
   --set mongo.existingSecret=my-mongo-secret
 ```
 
@@ -36,7 +36,7 @@ helm install clotho-control ./deploy/helm/clotho-control \
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `namespace` | Namespace for control plane components | `clotho-control` |
+| `namespace` | Namespace for control plane components | `clotho-system` |
 | `registry` | Container registry URL | `us-central1-docker.pkg.dev/quotopia-391900/clotho` |
 | `mongo.uri` | MongoDB connection string | `""` |
 | `mongo.existingSecret` | Reference existing Secret name | `""` |
@@ -95,7 +95,7 @@ The data proxy uses the following collections:
 ## Upgrading
 
 ```bash
-helm upgrade clotho-control ./deploy/helm/clotho-control \
-  --namespace clotho-control \
+helm upgrade clotho-system ./deploy/helm/clotho-system \
+  --namespace clotho-system \
   --set mongo.uri="mongodb://user:pass@mongo-host:27017"
 ```

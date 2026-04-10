@@ -4,12 +4,12 @@
 # SaaS customers do NOT need this chart - Clotho hosts the Control Plane for them.
 #
 # One-line install:
-#   helm install clotho-control ./deploy/helm/clotho-control \
-#     --namespace clotho-control --create-namespace \
+#   helm install clotho-system ./deploy/helm/clotho-system \
+#     --namespace clotho-system --create-namespace \
 #     --set mongo.uri="mongodb://user:pass@mongo-host:27017"
 
 # -- Namespace for control plane components
-namespace: clotho-control
+namespace: clotho-system
 
 # -- Environment → Namespace mapping
 # Each environment maps to a K8s namespace where pipelines run.

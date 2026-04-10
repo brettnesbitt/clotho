@@ -1,5 +1,5 @@
 apiVersion: v2
-name: clotho-control
+name: clotho-system
 description: "Clotho Control Plane - API + UI + telemetry database (Enterprise air-gapped deployment)"
 type: application
 version: 0.1.0

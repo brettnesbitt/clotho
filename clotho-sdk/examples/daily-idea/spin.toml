@@ -12,7 +12,7 @@ component = "daily-idea"
 
 [component.daily-idea]
 source = "target/wasm32-wasip1/release/daily_idea.wasm"
-allowed_outbound_hosts = ["https://stockseer.ai:443", "http://clotho-api.clotho-control.svc.cluster.local:3000"]
-environment = { CLOTHO_PIPELINE_ID = "daily-idea", CLOTHO_API_URL = "http://clotho-api.clotho-control.svc.cluster.local:3000" }
+allowed_outbound_hosts = ["https://stockseer.ai:443", "http://clotho-api.clotho-system.svc.cluster.local:3000"]
+environment = { CLOTHO_PIPELINE_ID = "daily-idea", CLOTHO_API_URL = "http://clotho-api.clotho-system.svc.cluster.local:3000" }
 [component.daily-idea.build]
 command = "cargo build --target wasm32-wasip1 --release"

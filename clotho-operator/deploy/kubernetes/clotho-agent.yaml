@@ -41,4 +41,4 @@ spec:
             memory: 32Mi
         env:
         - name: CLOTHO_API_URL
-          value: "http://clotho-api.clotho-control.svc.cluster.local:3000"
+          value: "http://clotho-api.clotho-system.svc.cluster.local:3000"

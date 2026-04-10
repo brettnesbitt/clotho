@@ -182,7 +182,7 @@ async fn main() -> Result<()> {
     // System namespaces to exclude from tracking
     let system_ns: Vec<String> = vec![
         "kube-system", "kube-public", "kube-node-lease",
-        "clotho-system", "clotho", "clotho-control",
+        "clotho-system", "clotho",
         "cert-manager", "gmp-system", "gmp-public",
         "gke-managed-system", "gke-managed-cim",
         "gke-managed-networking-dra-driver", "gke-managed-volumepopulator",

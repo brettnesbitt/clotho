@@ -170,7 +170,7 @@ func main() {
 
 	controlPlaneURL := os.Getenv("CLOTHO_CONTROL_PLANE_URL")
 	if controlPlaneURL == "" {
-		controlPlaneURL = "http://clotho-api.clotho-control.svc.cluster.local:3000"
+		controlPlaneURL = "http://clotho-api.clotho-system.svc.cluster.local:3000"
 	}
 
 	if err := (&controller.PipelineReconciler{

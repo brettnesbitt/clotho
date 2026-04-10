@@ -37,10 +37,10 @@ import (
 const namespace = "clotho-system"
 
 // serviceAccountName created for the project
-const serviceAccountName = "clotho-controller-manager"
+const serviceAccountName = "clotho-operator"
 
 // metricsServiceName is the name of the metrics service of the project
-const metricsServiceName = "clotho-controller-manager-metrics-service"
+const metricsServiceName = "clotho-operator-metrics-service"
 
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
 const metricsRoleBindingName = "clotho-metrics-binding"
