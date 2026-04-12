@@ -119,6 +119,21 @@ func (r *PipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	} else {
 		pipeline.Status.Phase = "Idling"
 	}
+	pipeline.Status.Message = ""
+
+	// Bubble up underlying workload failures
+	if pipeline.Spec.Runtime != clothov1alpha1.PipelineRuntimeNative {
+		var spinApp spinva1.SpinApp
+		if err := r.Get(ctx, types.NamespacedName{Name: pipeline.Name, Namespace: pipeline.Namespace}, &spinApp); err == nil {
+			for _, cond := range spinApp.Status.Conditions {
+				if cond.Status == "False" || cond.Status == "Unknown" {
+					pipeline.Status.Phase = "Failed"
+					pipeline.Status.Message = fmt.Sprintf("SpinApp %s: %s", cond.Reason, cond.Message)
+					break
+				}
+			}
+		}
+	}
 
 	// Good practice: Update ObservedGeneration so we know the status matches the spec
 	pipeline.Status.ObservedGeneration = pipeline.Generation
