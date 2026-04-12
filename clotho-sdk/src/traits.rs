@@ -33,6 +33,7 @@ pub trait Sink<T> {
     async fn write(&mut self, item: Context<T>) -> Result<()>;
 }
 
+#[cfg(feature = "batch")]
 #[async_trait]
 pub trait LookupTarget {
     /// Takes a batch of keys, queries the underlying datastore, 

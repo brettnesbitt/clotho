@@ -22,17 +22,54 @@ fn is_control_flow(e: &anyhow::Error) -> bool {
 }
 
 // The Error now hands ownership of the context back to the engine!
+#[cfg(not(target_family = "wasm"))]
 type AsyncTransformFn<T> = Box<dyn Fn(Context<T>) -> Pin<Box<dyn Future<Output = Result<Context<T>, (anyhow::Error, Context<T>)>> + Send>> + Send + Sync>;
+
+#[cfg(target_family = "wasm")]
+type AsyncTransformFn<T> = Box<dyn Fn(Context<T>) -> Pin<Box<dyn Future<Output = Result<Context<T>, (anyhow::Error, Context<T>)>>>>>;
 
 /// Free function so the compiler sees T: Clone in its own generic scope.
 /// (Rust can't propagate a method-level Clone bound into a closure that gets
 /// type-erased to AsyncTransformFn<T> whose T only has Send+Sync.)
+#[cfg(not(target_family = "wasm"))]
+fn make_branch_transform<T, F, K>(predicate: F, sink: K) -> AsyncTransformFn<T>
+where
+    T: Send + Sync + Clone + 'static,
+    F: Fn(&T) -> bool + Send + Sync + 'static,
+    K: Sink<T> + Send + 'static,
+{
+    let sink: Arc<Mutex<K>> = Arc::new(Mutex::new(sink));
+    Box::new(move |ctx: Context<T>| {
+        let matches = predicate(&ctx.data);
+        let sink: Arc<Mutex<K>> = Arc::clone(&sink);
+        Box::pin(async move {
+            if matches {
+                let branch_ctx = Context {
+                    data: ctx.data.clone(),
+                    span_id: ctx.span_id.clone(),
+                    parents: ctx.parents.clone(),
+                    meta: ctx.meta.clone(),
+                };
+                let mut sink = sink.lock().await;
+                if let Err(e) = sink.write(branch_ctx).await {
+                    eprintln!("[Clotho] Branch sink write failed: {}", e);
+                }
+                Err((anyhow::anyhow!(BRANCH_SENTINEL), ctx))
+            } else {
+                Ok(ctx)
+            }
+        })
+    })
+}
+
+#[cfg(target_family = "wasm")]
 fn make_branch_transform<T, F, K>(predicate: F, sink: K) -> AsyncTransformFn<T>
 where
     T: Send + Sync + Clone + 'static,
     F: Fn(&T) -> bool + Send + Sync + 'static,
     K: Sink<T> + 'static,
 {
+    // WASM does not need `Send` inside the Future, but Arc<Mutex> handles interior mutability.
     let sink: Arc<Mutex<K>> = Arc::new(Mutex::new(sink));
     Box::new(move |ctx: Context<T>| {
         let matches = predicate(&ctx.data);
@@ -134,6 +171,23 @@ where
     /// branch sink and removed from the main pipeline. Records not matching
     /// continue through the remaining transforms to the main sink.
     /// This is the selective version of tee() — only matching records are forked.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn branch<F, K>(mut self, predicate: F, sink: K) -> Self
+    where
+        F: Fn(&T) -> bool + Send + Sync + 'static,
+        K: Sink<T> + Send + 'static,
+        T: Clone,
+    {
+        let idx = self.next_step_idx();
+        self.transforms.push(make_branch_transform(predicate, sink));
+        self.transform_steps.push(StepInfo {
+            name: format!("branch_{}", idx),
+            step_type: "branch".to_string(),
+        });
+        self
+    }
+
+    #[cfg(target_family = "wasm")]
     pub fn branch<F, K>(mut self, predicate: F, sink: K) -> Self
     where
         F: Fn(&T) -> bool + Send + Sync + 'static,
@@ -177,10 +231,28 @@ where
     }
 
     /// Asynchronous Transform (I/O Bound - DB Lookups, API calls)
+    #[cfg(not(target_family = "wasm"))]
     pub fn map_async<F, Fut>(mut self, op: F) -> Self 
     where 
         F: Fn(Context<T>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Context<T>, (anyhow::Error, Context<T>)>> + Send + 'static
+    {
+        let idx = self.next_step_idx();
+        self.transforms.push(Box::new(move |ctx| {
+            Box::pin(op(ctx))
+        }));
+        self.transform_steps.push(StepInfo {
+            name: format!("map_async_{}", idx),
+            step_type: "transform".to_string(),
+        });
+        self
+    }
+
+    #[cfg(target_family = "wasm")]
+    pub fn map_async<F, Fut>(mut self, op: F) -> Self 
+    where 
+        F: Fn(Context<T>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Context<T>, (anyhow::Error, Context<T>)>> + 'static
     {
         let idx = self.next_step_idx();
         self.transforms.push(Box::new(move |ctx| {

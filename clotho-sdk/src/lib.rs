@@ -20,9 +20,10 @@ pub use clotho_macros::daemon;
 pub use builtins::{IntervalSource, MemorySink, MemorySource, memory_channel};
 
 // Re-export bus types for DAG pipelines
+#[cfg(not(target_family = "wasm"))]
 pub use bus::{BusSource, BusSink, BusConfig, bus_source, bus_sink};
 
-// Batch engine (Polars DataFrame)
+#[cfg(feature = "batch")]
 pub mod batch;
 
 pub use traits::{Source, Sink};
@@ -46,6 +47,7 @@ impl Pipeline {
 
     /// Create a High-Throughput, Columnar pipeline (Polars).
     /// Best for: ETL, Analytics, S3 Archiving, Database Sync.
+    #[cfg(feature = "batch")]
     pub fn batch<S>(source: S) -> batch::BatchPipeline<S> 
     where S: Source<polars::prelude::DataFrame> + 'static {
         batch::BatchPipeline::new(source)
