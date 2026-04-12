@@ -560,6 +560,37 @@ func (r *PipelineReconciler) reconcileExternalBuild(ctx context.Context, pipelin
 		return ctrl.Result{}, nil
 	}
 
+	jobName := fmt.Sprintf("cloudbuild-trigger-%s", pipeline.Name)
+	existingJob := &batchv1.Job{}
+	err := r.Get(ctx, types.NamespacedName{Name: jobName, Namespace: pipeline.Namespace}, existingJob)
+
+	if err == nil {
+		if existingJob.Status.Succeeded > 0 {
+			targetImage := existingJob.Annotations["clotho.run/target-image"]
+			if targetImage == "" {
+				targetImage = pipeline.Annotations["clotho.run/target-image"]
+			}
+			if pipeline.Spec.Image != targetImage {
+				log.Info("Tier 1.5: External build completed", "image", targetImage)
+				pipeline.Spec.Image = targetImage
+				return ctrl.Result{}, r.Update(ctx, pipeline)
+			}
+			log.Info("Tier 1.5: External build already completed")
+			return ctrl.Result{}, nil
+		}
+		if existingJob.Status.Failed > 0 {
+			log.Info("Tier 1.5: External build failed")
+			return ctrl.Result{}, nil
+		}
+		log.Info("Tier 1.5: External build still running, requeueing...")
+		return ctrl.Result{RequeueAfter: time.Second * 30}, nil
+	}
+
+	if !errors.IsNotFound(err) {
+		return ctrl.Result{}, err
+	}
+
+	// Job doesn't exist, we must trigger it
 	// Generate unique image tag
 	tag := fmt.Sprintf("%s-%d", sanitizeImageTagPart(pipeline.Spec.Reference), time.Now().Unix())
 	registry := buildConfig.Registry
@@ -567,20 +598,6 @@ func (r *PipelineReconciler) reconcileExternalBuild(ctx context.Context, pipelin
 		registry = "gcr.io"
 	}
 	targetImage := fmt.Sprintf("%s/%s:%s", registry, pipeline.Name, tag)
-
-	if pipeline.Annotations != nil {
-		if buildStatus := pipeline.Annotations["clotho.run/build-status"]; buildStatus == "completed" {
-			if builtImage := pipeline.Annotations["clotho.run/target-image"]; builtImage != "" {
-				log.Info("Tier 1.5: External build completed", "image", builtImage)
-				pipeline.Spec.Image = builtImage
-				return ctrl.Result{}, r.Update(ctx, pipeline)
-			}
-		}
-		if buildStatus := pipeline.Annotations["clotho.run/build-status"]; buildStatus == "running" {
-			log.Info("Tier 1.5: External build still running, requeueing...")
-			return ctrl.Result{RequeueAfter: time.Second * 30}, nil
-		}
-	}
 
 	switch buildConfig.Builder {
 	case "cloudbuild":
@@ -597,7 +614,6 @@ func (r *PipelineReconciler) reconcileExternalBuild(ctx context.Context, pipelin
 	if pipeline.Annotations == nil {
 		pipeline.Annotations = make(map[string]string)
 	}
-	pipeline.Annotations["clotho.run/build-status"] = "running"
 	pipeline.Annotations["clotho.run/target-image"] = targetImage
 	pipeline.Annotations["clotho.run/builder"] = buildConfig.Builder
 

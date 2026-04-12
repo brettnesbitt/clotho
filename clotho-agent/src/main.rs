@@ -40,6 +40,8 @@ enum TelemetryEvent {
     DataQuality(DataQualityEvent),
     Throughput(ThroughputEvent),
     Dlq(DlqEvent),
+    StepMetrics(StepMetricsEvent),
+    DataSample(DataSampleEvent),
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -88,6 +90,31 @@ struct DlqEvent {
     error: String,
     step: String,
     payload: String,
+    timestamp: u64,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+struct StepMetricsEvent {
+    pipeline_id: String,
+    stage_name: String,
+    step_name: String,
+    step_type: String,
+    records_in: u64,
+    records_out: u64,
+    records_filtered: u64,
+    records_branched: u64,
+    records_failed: u64,
+    duration_ms: u64,
+    timestamp: u64,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+struct DataSampleEvent {
+    pipeline_id: String,
+    stage_name: String,
+    step_name: String,
+    payload_in: String,
+    payload_out: String,
     timestamp: u64,
 }
 
@@ -276,6 +303,14 @@ async fn process_sdk_event(state: &Arc<Mutex<AgentState>>, event: TelemetryEvent
         TelemetryEvent::Dlq(e) => (
             e.pipeline_id.clone(),
             ApiEvent { event_type: "DLQ".into(), timestamp: now, payload: serde_json::to_value(e).unwrap() }
+        ),
+        TelemetryEvent::StepMetrics(e) => (
+            e.pipeline_id.clone(),
+            ApiEvent { event_type: "STEP_METRICS".into(), timestamp: now, payload: serde_json::to_value(e).unwrap() }
+        ),
+        TelemetryEvent::DataSample(e) => (
+            e.pipeline_id.clone(),
+            ApiEvent { event_type: "DATA_SAMPLE".into(), timestamp: now, payload: serde_json::to_value(e).unwrap() }
         ),
     };
 

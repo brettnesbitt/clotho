@@ -101,6 +101,7 @@ pub struct StreamPipeline<S, T> {
     tee_sinks: Vec<Box<dyn Sink<T>>>,
     tee_steps: Vec<StepInfo>, // Track step info for each tee
     step_metrics: HashMap<String, StepMetrics>, // Cumulative metrics per step
+    step_last_sample: HashMap<String, AtomicU64>, // Rate limiting for data sampling
     step_counter: AtomicU64, // For auto-naming steps
 }
 
@@ -117,6 +118,7 @@ where
             tee_sinks: Vec::new(),
             tee_steps: Vec::new(),
             step_metrics: HashMap::new(),
+            step_last_sample: HashMap::new(),
             step_counter: AtomicU64::new(0),
         }
     }
@@ -329,12 +331,47 @@ where
                             metrics.records_in.store(1, Ordering::Relaxed);
                             self.step_metrics.insert(step_name.to_string(), metrics);
                         }
+
+                        // Determine if we should sample this record (max 1 per second per step)
+                        let now_sec = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                            
+                        let should_sample = {
+                            let last = self.step_last_sample
+                                .entry(step_name.to_string())
+                                .or_insert_with(|| AtomicU64::new(0));
+                            if last.load(Ordering::Relaxed) < now_sec {
+                                last.store(now_sec, Ordering::Relaxed);
+                                true
+                            } else {
+                                false
+                            }
+                        };
+                        
+                        let payload_in_str = if should_sample {
+                            serde_json::to_string(&ctx_to_process.data).unwrap_or_else(|_| "".into())
+                        } else {
+                            "".to_string()
+                        };
                         
                         match op(ctx_to_process).await {
                             Ok(new_ctx) => {
                                 // Record successfully passed through this step
                                 if let Some(metrics) = self.step_metrics.get(step_name) {
                                     metrics.records_out.fetch_add(1, Ordering::Relaxed);
+                                }
+                                
+                                if should_sample {
+                                    let payload_out_str = serde_json::to_string(&new_ctx.data).unwrap_or_else(|_| "".into());
+                                    telemetry::emit_data_sample(
+                                        &pipeline_id,
+                                        "", // stage_name
+                                        step_name,
+                                        &payload_in_str,
+                                        &payload_out_str,
+                                    );
                                 }
                                 
                                 // Emit step metrics telemetry
