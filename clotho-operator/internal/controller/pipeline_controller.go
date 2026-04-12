@@ -200,6 +200,11 @@ func (r *PipelineReconciler) constructSpinApp(p *clothov1alpha1.Pipeline) *spinv
 		Requests: p.Spec.Resources.Requests,
 	}
 
+	replicas := p.Spec.Replicas
+	if replicas == 0 {
+		replicas = 1
+	}
+
 	return &spinva1.SpinApp{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      p.Name,
@@ -209,7 +214,7 @@ func (r *PipelineReconciler) constructSpinApp(p *clothov1alpha1.Pipeline) *spinv
 		Spec: spinva1.SpinAppSpec{
 			Image:            p.Spec.Image,
 			Executor:         "containerd-shim-spin", // Native Kubelet integration
-			Replicas:         p.Spec.Replicas,
+			Replicas:         replicas,
 			ImagePullSecrets: p.Spec.ImagePullSecrets,
 			Variables:        vars,
 			Resources:        resources,
@@ -486,10 +491,10 @@ func (r *PipelineReconciler) reconcileBuild(ctx context.Context, pipeline *cloth
 						Env: r.buildEnvVars(pipeline),
 						Resources: corev1.ResourceRequirements{
 							Requests: corev1.ResourceList{
-								corev1.ResourceMemory: resource.MustParse("1Gi"),
+								corev1.ResourceMemory: resource.MustParse("128Mi"),
 							},
 							Limits: corev1.ResourceList{
-								corev1.ResourceMemory: resource.MustParse("4Gi"),
+								corev1.ResourceMemory: resource.MustParse("1024Mi"),
 							},
 						},
 						VolumeMounts: []corev1.VolumeMount{
@@ -637,13 +642,37 @@ func (r *PipelineReconciler) triggerCloudBuild(ctx context.Context, pipeline *cl
 					RestartPolicy: corev1.RestartPolicyNever,
 					Containers: []corev1.Container{{
 						Name:  "cloudbuild-trigger",
-						Image: "gcr.io/cloud-builders/gcloud-slim:latest",
+						Image: "gcr.io/cloud-builders/gcloud:latest",
 						Command: []string{"sh", "-c", fmt.Sprintf(`
+							set -e
 							if [ -f /etc/cloudbuild/key.json ]; then
 								gcloud auth activate-service-account --key-file=/etc/cloudbuild/key.json
+							elif [ -f /etc/cloudbuild/token ]; then
+								gcloud auth activate-service-account --key-file=/etc/cloudbuild/token
 							fi
-							gcloud builds submit --tag=%s --revision=%s %s
-						`, targetImage, pipeline.Spec.Reference, pipeline.Spec.GitRepository)},
+							REPO_URL="%s"
+							if [ -n "$GIT_TOKEN" ]; then
+								REPO_URL=$(echo "$REPO_URL" | sed "s|https://|https://${GIT_TOKEN}@|")
+							fi
+							git clone --depth 1 --branch %s "$REPO_URL" /tmp/repo
+							cd /tmp/repo/%s
+							# Bundle clotho dependency for Cloud Build
+							if [ -f Cargo.toml ] && grep -q "clotho" Cargo.toml; then
+								git clone --depth 1 --branch spinkube-updates "https://${GIT_TOKEN}@github.com/brettnesbitt/clotho.git" vendor-clotho
+								sed -i "s|\.\./\.\./\.\./clotho|vendor-clotho|g" Cargo.toml
+							fi
+							gcloud builds submit . \
+								--config=cloudbuild.yaml \
+								--substitutions=_TARGET_IMAGE=%s
+						`, pipeline.Spec.GitRepository, pipeline.Spec.Reference, pipeline.Spec.Path, targetImage)},
+						Env: []corev1.EnvVar{{
+							Name: "GIT_TOKEN",
+							ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+								LocalObjectReference: corev1.LocalObjectReference{Name: "clotho-git-credentials"},
+								Key:                  "token",
+								Optional:             boolPtr(true),
+							}},
+						}},
 						VolumeMounts: []corev1.VolumeMount{{
 							Name:      "cloudbuild-key",
 							MountPath: "/etc/cloudbuild",
