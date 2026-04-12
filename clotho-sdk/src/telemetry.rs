@@ -348,6 +348,54 @@ pub fn emit_step_metrics(
     }
 }
 
+/// Data sample payload
+#[derive(Serialize)]
+pub struct DataSamplePayload {
+    pub pipeline_id: String,
+    pub stage_name: String,
+    pub step_name: String,
+    pub payload_in: String,
+    pub payload_out: String,
+    pub timestamp: u64,
+}
+
+/// Tagged telemetry event for data sample
+#[derive(Serialize)]
+pub struct DataSampleEvent {
+    #[serde(rename = "type")]
+    pub event_type: String,
+    pub payload: DataSamplePayload,
+}
+
+/// Emit step data sample to the Clotho Agent.
+/// Expected to be rate-limited by the caller (e.g. 1 per second per step).
+pub fn emit_data_sample(
+    pipeline_id: &str,
+    stage_name: &str,
+    step_name: &str,
+    payload_in: &str,
+    payload_out: &str,
+) {
+    let event = DataSampleEvent {
+        event_type: "DataSample".to_string(),
+        payload: DataSamplePayload {
+            pipeline_id: pipeline_id.to_string(),
+            stage_name: stage_name.to_string(),
+            step_name: step_name.to_string(),
+            payload_in: payload_in.to_string(),
+            payload_out: payload_out.to_string(),
+            timestamp: now_secs(),
+        },
+    };
+
+    let addr = agent_addr();
+    if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
+        if let Ok(data) = serde_json::to_vec(&event) {
+            let _ = socket.send_to(&data, &addr);
+        }
+    }
+}
+
 /// Data quality event payload
 #[derive(Serialize)]
 struct DataQualityPayload {

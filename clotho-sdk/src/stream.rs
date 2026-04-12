@@ -22,17 +22,54 @@ fn is_control_flow(e: &anyhow::Error) -> bool {
 }
 
 // The Error now hands ownership of the context back to the engine!
+#[cfg(not(target_family = "wasm"))]
 type AsyncTransformFn<T> = Box<dyn Fn(Context<T>) -> Pin<Box<dyn Future<Output = Result<Context<T>, (anyhow::Error, Context<T>)>> + Send>> + Send + Sync>;
+
+#[cfg(target_family = "wasm")]
+type AsyncTransformFn<T> = Box<dyn Fn(Context<T>) -> Pin<Box<dyn Future<Output = Result<Context<T>, (anyhow::Error, Context<T>)>>>>>;
 
 /// Free function so the compiler sees T: Clone in its own generic scope.
 /// (Rust can't propagate a method-level Clone bound into a closure that gets
 /// type-erased to AsyncTransformFn<T> whose T only has Send+Sync.)
+#[cfg(not(target_family = "wasm"))]
+fn make_branch_transform<T, F, K>(predicate: F, sink: K) -> AsyncTransformFn<T>
+where
+    T: Send + Sync + Clone + 'static,
+    F: Fn(&T) -> bool + Send + Sync + 'static,
+    K: Sink<T> + Send + 'static,
+{
+    let sink: Arc<Mutex<K>> = Arc::new(Mutex::new(sink));
+    Box::new(move |ctx: Context<T>| {
+        let matches = predicate(&ctx.data);
+        let sink: Arc<Mutex<K>> = Arc::clone(&sink);
+        Box::pin(async move {
+            if matches {
+                let branch_ctx = Context {
+                    data: ctx.data.clone(),
+                    span_id: ctx.span_id.clone(),
+                    parents: ctx.parents.clone(),
+                    meta: ctx.meta.clone(),
+                };
+                let mut sink = sink.lock().await;
+                if let Err(e) = sink.write(branch_ctx).await {
+                    eprintln!("[Clotho] Branch sink write failed: {}", e);
+                }
+                Err((anyhow::anyhow!(BRANCH_SENTINEL), ctx))
+            } else {
+                Ok(ctx)
+            }
+        })
+    })
+}
+
+#[cfg(target_family = "wasm")]
 fn make_branch_transform<T, F, K>(predicate: F, sink: K) -> AsyncTransformFn<T>
 where
     T: Send + Sync + Clone + 'static,
     F: Fn(&T) -> bool + Send + Sync + 'static,
     K: Sink<T> + 'static,
 {
+    // WASM does not need `Send` inside the Future, but Arc<Mutex> handles interior mutability.
     let sink: Arc<Mutex<K>> = Arc::new(Mutex::new(sink));
     Box::new(move |ctx: Context<T>| {
         let matches = predicate(&ctx.data);
@@ -64,6 +101,7 @@ pub struct StreamPipeline<S, T> {
     tee_sinks: Vec<Box<dyn Sink<T>>>,
     tee_steps: Vec<StepInfo>, // Track step info for each tee
     step_metrics: HashMap<String, StepMetrics>, // Cumulative metrics per step
+    step_last_sample: HashMap<String, AtomicU64>, // Rate limiting for data sampling
     step_counter: AtomicU64, // For auto-naming steps
 }
 
@@ -80,6 +118,7 @@ where
             tee_sinks: Vec::new(),
             tee_steps: Vec::new(),
             step_metrics: HashMap::new(),
+            step_last_sample: HashMap::new(),
             step_counter: AtomicU64::new(0),
         }
     }
@@ -134,6 +173,23 @@ where
     /// branch sink and removed from the main pipeline. Records not matching
     /// continue through the remaining transforms to the main sink.
     /// This is the selective version of tee() — only matching records are forked.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn branch<F, K>(mut self, predicate: F, sink: K) -> Self
+    where
+        F: Fn(&T) -> bool + Send + Sync + 'static,
+        K: Sink<T> + Send + 'static,
+        T: Clone,
+    {
+        let idx = self.next_step_idx();
+        self.transforms.push(make_branch_transform(predicate, sink));
+        self.transform_steps.push(StepInfo {
+            name: format!("branch_{}", idx),
+            step_type: "branch".to_string(),
+        });
+        self
+    }
+
+    #[cfg(target_family = "wasm")]
     pub fn branch<F, K>(mut self, predicate: F, sink: K) -> Self
     where
         F: Fn(&T) -> bool + Send + Sync + 'static,
@@ -177,10 +233,28 @@ where
     }
 
     /// Asynchronous Transform (I/O Bound - DB Lookups, API calls)
+    #[cfg(not(target_family = "wasm"))]
     pub fn map_async<F, Fut>(mut self, op: F) -> Self 
     where 
         F: Fn(Context<T>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Context<T>, (anyhow::Error, Context<T>)>> + Send + 'static
+    {
+        let idx = self.next_step_idx();
+        self.transforms.push(Box::new(move |ctx| {
+            Box::pin(op(ctx))
+        }));
+        self.transform_steps.push(StepInfo {
+            name: format!("map_async_{}", idx),
+            step_type: "transform".to_string(),
+        });
+        self
+    }
+
+    #[cfg(target_family = "wasm")]
+    pub fn map_async<F, Fut>(mut self, op: F) -> Self 
+    where 
+        F: Fn(Context<T>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Context<T>, (anyhow::Error, Context<T>)>> + 'static
     {
         let idx = self.next_step_idx();
         self.transforms.push(Box::new(move |ctx| {
@@ -257,12 +331,47 @@ where
                             metrics.records_in.store(1, Ordering::Relaxed);
                             self.step_metrics.insert(step_name.to_string(), metrics);
                         }
+
+                        // Determine if we should sample this record (max 1 per second per step)
+                        let now_sec = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                            
+                        let should_sample = {
+                            let last = self.step_last_sample
+                                .entry(step_name.to_string())
+                                .or_insert_with(|| AtomicU64::new(0));
+                            if last.load(Ordering::Relaxed) < now_sec {
+                                last.store(now_sec, Ordering::Relaxed);
+                                true
+                            } else {
+                                false
+                            }
+                        };
+                        
+                        let payload_in_str = if should_sample {
+                            serde_json::to_string(&ctx_to_process.data).unwrap_or_else(|_| "".into())
+                        } else {
+                            "".to_string()
+                        };
                         
                         match op(ctx_to_process).await {
                             Ok(new_ctx) => {
                                 // Record successfully passed through this step
                                 if let Some(metrics) = self.step_metrics.get(step_name) {
                                     metrics.records_out.fetch_add(1, Ordering::Relaxed);
+                                }
+                                
+                                if should_sample {
+                                    let payload_out_str = serde_json::to_string(&new_ctx.data).unwrap_or_else(|_| "".into());
+                                    telemetry::emit_data_sample(
+                                        &pipeline_id,
+                                        "", // stage_name
+                                        step_name,
+                                        &payload_in_str,
+                                        &payload_out_str,
+                                    );
                                 }
                                 
                                 // Emit step metrics telemetry

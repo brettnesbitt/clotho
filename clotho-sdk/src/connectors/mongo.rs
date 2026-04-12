@@ -32,8 +32,11 @@ use std::num::NonZeroUsize;
 #[cfg(feature = "native")]
 use tokio::sync::Mutex;
 
+#[cfg(feature = "batch")]
 use crate::traits::LookupTarget;
+#[cfg(feature = "batch")]
 use polars::prelude::DataFrame;
+#[cfg(feature = "batch")]
 use polars::prelude::{SerReader, SerWriter};
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -99,7 +102,7 @@ impl MongoLookup {
 }
 
 // ── Batch LookupTarget (native only) ─────────
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "batch"))]
 #[async_trait]
 impl LookupTarget for MongoLookup {
     async fn lookup_batch(&self, keys: Vec<&str>) -> Result<DataFrame> {
