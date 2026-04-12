@@ -172,7 +172,17 @@ func (r *PipelineReconciler) constructSpinApp(p *clothov1alpha1.Pipeline) *spinv
 		},
 	}
 
+	userDefinedVars := make(map[string]bool)
+	for _, v := range vars {
+		userDefinedVars[v.Name] = true
+	}
+
 	for _, cfg := range p.Spec.Config {
+		if userDefinedVars[cfg.Name] {
+			// Skip user-defined vars that match injected ones to avoid duplicate env errors
+			continue
+		}
+
 		v := spinva1.SpinVar{
 			Name: cfg.Name,
 		}
