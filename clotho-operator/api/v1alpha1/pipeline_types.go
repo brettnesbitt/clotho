@@ -279,6 +279,9 @@ type PipelineStatus struct {
 	// Conditions provides detailed reasons for the current state
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
+	// Message provides a human-readable explanation of the current phase or error state.
+	Message string `json:"message,omitempty"`
+
 	// URL is the public endpoint if exposed
 	URL string `json:"url,omitempty"`
 
