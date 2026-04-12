@@ -4,7 +4,7 @@ use crate::types::{Context, ContractStatus};
 use crate::telemetry::{StepInfo, StepMetrics};
 use crate::telemetry;
 use polars::prelude::{DataFrame, LazyFrame, IntoLazy, JoinType, JoinArgs};
-use polars::lazy::dsl::col;
+use polars::prelude::col;
 use anyhow::Result;
 use std::marker::PhantomData;
 use std::future::Future;

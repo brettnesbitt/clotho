@@ -80,6 +80,13 @@ type PipelineSpec struct {
 	// +optional
 	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
 
+	// Build defines external image builder configuration (Tier 1.5).
+	// When specified, the operator triggers builds on external services (e.g., Cloud Build)
+	// instead of building locally in-cluster. The operator watches for build completion
+	// and pulls the resulting image from the specified registry.
+	// +optional
+	Build *ImageBuildSpec `json:"build,omitempty"`
+
 	// 2. Runtime Configuration (The "Variables")
 	// Defines environment variables and secret injections.
 	// +optional
@@ -216,6 +223,52 @@ type PolicySpec struct {
 	// MaxRetries: How many times to retry on failure.
 	// +kubebuilder:default:=3
 	MaxRetries int32 `json:"maxRetries,omitempty"`
+}
+
+// ImageBuildSpec defines external image builder configuration.
+// When specified, the operator triggers builds on external services
+// (e.g., Cloud Build, GitHub Actions, etc.) instead of building locally in-cluster.
+type ImageBuildSpec struct {
+	// Builder specifies the external build service to use.
+	// +kubebuilder:validation:Enum=cloudbuild;github-actions;gitlab-ci;tekton;custom
+	Builder string `json:"builder"`
+
+	// Registry is the target image registry where the built image will be pushed.
+	// Example: "gcr.io/my-project/clotho-pipelines"
+	Registry string `json:"registry"`
+
+	// CredentialsSecret is the name of a Secret containing registry credentials.
+	// The secret should have:
+	//   - "username" and "password" keys for basic auth
+	//   - OR "token" key for token-based auth (e.g., GCP service account JSON)
+	// +optional
+	CredentialsSecret string `json:"credentialsSecret,omitempty"`
+
+	// ServiceAccountSecret is the name of a Secret containing the external builder's
+	// service account credentials (e.g., Cloud Build service account key).
+	// The secret format depends on the builder type:
+	//   - cloudbuild: GCP service account JSON key
+	//   - github-actions: GitHub PAT with repo and workflow scopes
+	//   - gitlab-ci: GitLab CI/CD token
+	// +optional
+	ServiceAccountSecret string `json:"serviceAccountSecret,omitempty"`
+
+	// BuildArgs are additional arguments passed to the build process.
+	// For Cloud Build, these become substitution variables (_KEY=value).
+	// +optional
+	BuildArgs map[string]string `json:"buildArgs,omitempty"`
+
+	// Dockerfile is the path to the Dockerfile (for container builds).
+	// Defaults to "Dockerfile" in the repository root.
+	// +kubebuilder:default:="Dockerfile"
+	// +optional
+	Dockerfile string `json:"dockerfile,omitempty"`
+
+	// Timeout is the maximum time to wait for the external build to complete.
+	// Defaults to "10m".
+	// +kubebuilder:default:="10m"
+	// +optional
+	Timeout string `json:"timeout,omitempty"`
 }
 
 // PipelineStatus defines the observed state of Pipeline

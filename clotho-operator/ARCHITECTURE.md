@@ -2,9 +2,9 @@
 
 ## Overview
 
-Clotho is a Kubernetes-native platform for deploying WebAssembly pipelines. It provides a declarative API for building, deploying, and managing WASM workloads with two deployment strategies.
+Clotho is a Kubernetes-native platform for deploying WebAssembly pipelines. It provides a declarative API for building, deploying, and managing WASM workloads with three deployment strategies.
 
-## Two-Tier Registry Strategy
+## Three-Tier Registry Strategy
 
 ### Tier 1: Batteries Included (Internal Registry)
 
@@ -31,6 +31,61 @@ spec:
   path: pipelines/example  # Optional: subdirectory in monorepo
   gitCredentialsSecret: github-pat  # Optional: for private repos
   replicas: 3
+```
+
+### Tier 1.5: External Builder (Cloud Build, GitHub Actions, etc.)
+
+**For production deployments without managing an internal registry.**
+
+Users provide a Git repository URL, but builds are triggered on external services (Cloud Build, GitHub Actions, etc.) instead of in-cluster. The operator watches the external build and pulls the resulting image from the specified registry once complete.
+
+**Benefits:**
+- No internal registry TLS/configuration issues
+- Leverages managed build services with caching and parallelization
+- Push to any registry (GCP Artifact Registry, AWS ECR, Docker Hub, etc.)
+
+**Status:** 🚧 **Planned - requires controller implementation**
+
+**Example (GCP Cloud Build):**
+```yaml
+apiVersion: core.clotho.run/v1alpha1
+kind: Pipeline
+metadata:
+  name: my-pipeline
+spec:
+  gitRepository: https://github.com/org/repo.git
+  reference: main
+  path: pipelines/example
+  build:
+    builder: cloudbuild
+    registry: us-central1-docker.pkg.dev/my-project/clotho-pipelines
+    credentialsSecret: gcr-credentials        # For pulling the image
+    serviceAccountSecret: cloudbuild-sa-key   # For triggering Cloud Build
+    buildArgs:
+      _RUST_VERSION: "1.75"
+  replicas: 3
+```
+
+**Required Secrets:**
+
+```yaml
+# For pulling from private registry (GCR/Artifact Registry)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gcr-credentials
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: <base64-encoded-docker-config>
+
+# For triggering Cloud Build
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cloudbuild-sa-key
+type: Opaque
+data:
+  token: <base64-encoded-gcp-service-account-json>
 ```
 
 ### Tier 2: BYOR (Bring Your Own Registry)
@@ -63,8 +118,9 @@ spec:
 Kubernetes controller that reconciles `Pipeline` CRDs into `SpinApp` resources.
 
 **Key Logic:**
-- **Tier 1:** If `spec.gitRepository` is set → create builder Job → wait for completion → update `spec.image` → create SpinApp
-- **Tier 2:** If `spec.image` is set and `spec.gitRepository` is empty → skip builder → create SpinApp directly
+- **Tier 1:** If `spec.gitRepository` is set and `spec.build` is empty → create in-cluster builder Job → wait for completion → update `spec.image` → create SpinApp
+- **Tier 1.5:** If `spec.build` is set → trigger external build → poll/wait for completion → update `spec.image` → create SpinApp
+- **Tier 2:** If `spec.image` is set and `spec.gitRepository`/`spec.build` are empty → skip builder → create SpinApp directly
 - **Validation:** Checks that referenced secrets exist before deployment
 - **Owner References:** Automatic garbage collection of SpinApps and Jobs
 

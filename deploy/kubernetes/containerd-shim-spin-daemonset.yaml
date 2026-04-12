@@ -1,0 +1,100 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: install-containerd-shim-spin
+  namespace: kube-system
+  labels:
+    app: install-containerd-shim-spin
+spec:
+  selector:
+    matchLabels:
+      app: install-containerd-shim-spin
+  template:
+    metadata:
+      labels:
+        app: install-containerd-shim-spin
+    spec:
+      # Only run on wasm-pool nodes
+      nodeSelector:
+        cloud.google.com/gke-nodepool: wasm-pool
+      tolerations:
+        - operator: Exists
+      hostPID: true
+      initContainers:
+        - name: install-shim
+          image: ubuntu:24.04
+          securityContext:
+            privileged: true
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+
+              SHIM_VERSION="v0.23.0"
+              SHIM_URL="https://github.com/spinkube/containerd-shim-spin/releases/download/${SHIM_VERSION}/containerd-shim-spin-v2-linux-x86_64.tar.gz"
+              INSTALLED_MARKER="/host/usr/local/bin/.containerd-shim-spin-${SHIM_VERSION}"
+
+              # Skip if already installed this version
+              if [ -f "$INSTALLED_MARKER" ]; then
+                echo "containerd-shim-spin ${SHIM_VERSION} already installed, skipping."
+                exit 0
+              fi
+
+              echo "Installing containerd-shim-spin ${SHIM_VERSION}..."
+
+              # Install curl if not present
+              apt-get update -qq && apt-get install -y -qq curl tar >/dev/null 2>&1
+
+              # Download and extract
+              cd /tmp
+              curl -fsSL "$SHIM_URL" -o shim.tar.gz
+              tar xzf shim.tar.gz
+
+              # Install binaries to host
+              cp -f containerd-shim-spin-v2 /host/usr/local/bin/
+              cp -f containerd-shim-spin-v1 /host/usr/local/bin/ 2>/dev/null || true
+              chmod +x /host/usr/local/bin/containerd-shim-spin-*
+
+              # Write containerd config drop-in for the "spin" runtime handler
+              # GKE uses containerd v2 with io.containerd.grpc.v1.cri plugin
+              mkdir -p /host/etc/containerd/config.d
+              cat > /host/etc/containerd/config.d/spin.toml << 'EOF'
+              [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.spin]
+                runtime_type = "io.containerd.spin.v2"
+                [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.spin.options]
+                  BinaryName = "/usr/local/bin/containerd-shim-spin-v2"
+              EOF
+
+              # Ensure config.d is imported in main config.toml
+              # GKE's containerd may not have imports directive by default
+              if ! grep -q 'imports' /host/etc/containerd/config.toml 2>/dev/null; then
+                sed -i '1i imports = ["/etc/containerd/config.d/*.toml"]' /host/etc/containerd/config.toml
+                echo "Added imports directive to containerd config.toml"
+              fi
+
+              # Mark as installed
+              touch "$INSTALLED_MARKER"
+
+              echo "containerd-shim-spin ${SHIM_VERSION} installed successfully."
+
+              # Restart containerd to pick up new runtime config
+              # Use nsenter to talk to PID 1's namespaces
+              nsenter --target 1 --mount --uts --ipc --net --pid -- \
+                systemctl restart containerd
+              echo "containerd restarted."
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+      containers:
+        - name: done
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory
