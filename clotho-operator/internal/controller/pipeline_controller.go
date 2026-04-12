@@ -374,11 +374,19 @@ func (r *PipelineReconciler) reconcileBuild(ctx context.Context, pipeline *cloth
 	// If the user set spec.image AND there is no gitRepository,
 	// skip the builder entirely. The image is already built.
 	// -----------------------------------------------------------
-	if pipeline.Spec.GitRepository == "" {
+	if pipeline.Spec.GitRepository == "" && pipeline.Spec.Build == nil {
 		if pipeline.Spec.Image != "" {
 			log.Info("Tier 2: Using pre-built image, skipping builder", "image", pipeline.Spec.Image)
 		}
 		return ctrl.Result{}, nil
+	}
+
+	// -----------------------------------------------------------
+	// Tier 1.5: External Builder (Cloud Build, GitHub Actions, etc.)
+	// If spec.build is set, trigger external build instead of in-cluster.
+	// -----------------------------------------------------------
+	if pipeline.Spec.Build != nil && pipeline.Spec.Image == "" {
+		return r.reconcileExternalBuild(ctx, pipeline)
 	}
 
 	// -----------------------------------------------------------
@@ -388,17 +396,12 @@ func (r *PipelineReconciler) reconcileBuild(ctx context.Context, pipeline *cloth
 	// always pulls the fresh OCI artifact (no stale cache).
 	// -----------------------------------------------------------
 
-	// If image is already set, build was completed — skip
-	if pipeline.Spec.Image != "" {
-		return ctrl.Result{}, nil
-	}
-
-	// Check if a Build Job is already running
 	jobName := fmt.Sprintf("builder-%s", pipeline.Name)
 	existingJob := &batchv1.Job{}
 	err := r.Get(ctx, types.NamespacedName{Name: jobName, Namespace: pipeline.Namespace}, existingJob)
 
 	if err == nil {
+		// Job exists - check its status
 		if existingJob.Status.Succeeded > 0 {
 			// Read the target image from the job annotation
 			targetImage := existingJob.Annotations["clotho.run/target-image"]
@@ -406,9 +409,14 @@ func (r *PipelineReconciler) reconcileBuild(ctx context.Context, pipeline *cloth
 				// Fallback for jobs created before this change
 				targetImage = fmt.Sprintf("%s/%s:%s", internalRegistry, pipeline.Name, pipeline.Spec.Reference)
 			}
-			log.Info("Build job completed, updating image", "image", targetImage)
-			pipeline.Spec.Image = targetImage
-			return ctrl.Result{}, r.Update(ctx, pipeline)
+			// Only update spec.image if it's different (avoid unnecessary updates)
+			if pipeline.Spec.Image != targetImage {
+				log.Info("Build job completed, updating image", "image", targetImage)
+				pipeline.Spec.Image = targetImage
+				return ctrl.Result{}, r.Update(ctx, pipeline)
+			}
+			log.Info("Build already completed", "image", targetImage)
+			return ctrl.Result{}, nil
 		}
 		if existingJob.Status.Failed > 0 {
 			log.Info("Build job failed", "job", jobName)
@@ -418,8 +426,29 @@ func (r *PipelineReconciler) reconcileBuild(ctx context.Context, pipeline *cloth
 		return ctrl.Result{RequeueAfter: time.Second * 10}, nil
 	}
 
+	// Job not found
 	if !errors.IsNotFound(err) {
 		return ctrl.Result{}, err
+	}
+
+	// If image is already set and job is gone, assume build completed successfully
+	// UNLESS the image tag doesn't match the current reference (user may want rebuild)
+	if pipeline.Spec.Image != "" {
+		// Check if the image was built from the current reference
+		// If not, the user may have changed the reference and wants a new build
+		expectedTagPrefix := sanitizeImageTagPart(pipeline.Spec.Reference)
+		if !strings.Contains(pipeline.Spec.Image, expectedTagPrefix) {
+			log.Info("Reference changed since last build, triggering rebuild", "image", pipeline.Spec.Image, "reference", pipeline.Spec.Reference)
+			// Clear the image to force a new build
+			pipeline.Spec.Image = ""
+			if err := r.Update(ctx, pipeline); err != nil {
+				return ctrl.Result{}, err
+			}
+			// Requeue to trigger the new build
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
+		log.Info("Build job not found but image is set, assuming build completed", "image", pipeline.Spec.Image)
+		return ctrl.Result{}, nil
 	}
 
 	// Generate a unique tag: <reference>-<unix-timestamp>
@@ -511,6 +540,227 @@ func (r *PipelineReconciler) reconcileBuild(ctx context.Context, pipeline *cloth
 	}
 
 	if err := controllerutil.SetControllerReference(pipeline, job, r.Scheme); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	return ctrl.Result{}, r.Create(ctx, job)
+}
+
+// reconcileExternalBuild handles Tier 1.5: External builders like Cloud Build
+func (r *PipelineReconciler) reconcileExternalBuild(ctx context.Context, pipeline *clothov1alpha1.Pipeline) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+	buildConfig := pipeline.Spec.Build
+
+	if buildConfig == nil {
+		return ctrl.Result{}, nil
+	}
+
+	// Generate unique image tag
+	tag := fmt.Sprintf("%s-%d", sanitizeImageTagPart(pipeline.Spec.Reference), time.Now().Unix())
+	registry := buildConfig.Registry
+	if registry == "" {
+		registry = "gcr.io"
+	}
+	targetImage := fmt.Sprintf("%s/%s:%s", registry, pipeline.Name, tag)
+
+	if pipeline.Annotations != nil {
+		if buildStatus := pipeline.Annotations["clotho.run/build-status"]; buildStatus == "completed" {
+			if builtImage := pipeline.Annotations["clotho.run/target-image"]; builtImage != "" {
+				log.Info("Tier 1.5: External build completed", "image", builtImage)
+				pipeline.Spec.Image = builtImage
+				return ctrl.Result{}, r.Update(ctx, pipeline)
+			}
+		}
+		if buildStatus := pipeline.Annotations["clotho.run/build-status"]; buildStatus == "running" {
+			log.Info("Tier 1.5: External build still running, requeueing...")
+			return ctrl.Result{RequeueAfter: time.Second * 30}, nil
+		}
+	}
+
+	switch buildConfig.Builder {
+	case "cloudbuild":
+		log.Info("Tier 1.5: Triggering Cloud Build", "image", targetImage)
+		if err := r.triggerCloudBuild(ctx, pipeline, targetImage); err != nil {
+			log.Error(err, "Failed to trigger Cloud Build")
+			return ctrl.Result{}, err
+		}
+	default:
+		log.Info("Tier 1.5: External builder type not yet implemented", "builder", buildConfig.Builder)
+		return r.reconcileBuildTier1(ctx, pipeline)
+	}
+
+	if pipeline.Annotations == nil {
+		pipeline.Annotations = make(map[string]string)
+	}
+	pipeline.Annotations["clotho.run/build-status"] = "running"
+	pipeline.Annotations["clotho.run/target-image"] = targetImage
+	pipeline.Annotations["clotho.run/builder"] = buildConfig.Builder
+
+	return ctrl.Result{RequeueAfter: time.Second * 30}, r.Update(ctx, pipeline)
+}
+
+// triggerCloudBuild triggers a Cloud Build job via the GCP API
+func (r *PipelineReconciler) triggerCloudBuild(ctx context.Context, pipeline *clothov1alpha1.Pipeline, targetImage string) error {
+	log := log.FromContext(ctx)
+	buildConfig := pipeline.Spec.Build
+	if buildConfig == nil {
+		return fmt.Errorf("build config is nil")
+	}
+
+	jobName := fmt.Sprintf("cloudbuild-trigger-%s", pipeline.Name)
+	buildArgs := []string{
+		"builds", "submit",
+		"--config", "cloudbuild.yaml",
+		"--substitutions", fmt.Sprintf("_REGISTRY=%s,_IMAGE_NAME=%s", buildConfig.Registry, pipeline.Name),
+		"--tag", targetImage,
+		pipeline.Spec.GitRepository,
+	}
+	for key, value := range buildConfig.BuildArgs {
+		buildArgs = append(buildArgs, "--substitutions", fmt.Sprintf("%s=%s", key, value))
+	}
+
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName,
+			Namespace: pipeline.Namespace,
+			Annotations: map[string]string{
+				"clotho.run/pipeline":     pipeline.Name,
+				"clotho.run/target-image": targetImage,
+			},
+		},
+		Spec: batchv1.JobSpec{
+			TTLSecondsAfterFinished: int32Ptr(3600),
+			ActiveDeadlineSeconds:   int64Ptr(7200),
+			BackoffLimit:            int32Ptr(0),
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers: []corev1.Container{{
+						Name:  "cloudbuild-trigger",
+						Image: "gcr.io/cloud-builders/gcloud-slim:latest",
+						Command: []string{"sh", "-c", fmt.Sprintf(`
+							if [ -f /etc/cloudbuild/key.json ]; then
+								gcloud auth activate-service-account --key-file=/etc/cloudbuild/key.json
+							fi
+							gcloud builds submit --tag=%s --revision=%s %s
+						`, targetImage, pipeline.Spec.Reference, pipeline.Spec.GitRepository)},
+						VolumeMounts: []corev1.VolumeMount{{
+							Name:      "cloudbuild-key",
+							MountPath: "/etc/cloudbuild",
+							ReadOnly:  true,
+						}},
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceMemory: resource.MustParse("256Mi"),
+								corev1.ResourceCPU:    resource.MustParse("100m"),
+							},
+							Limits: corev1.ResourceList{
+								corev1.ResourceMemory: resource.MustParse("512Mi"),
+								corev1.ResourceCPU:    resource.MustParse("500m"),
+							},
+						},
+					}},
+					Volumes: []corev1.Volume{{
+						Name: "cloudbuild-key",
+						VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+							SecretName: buildConfig.ServiceAccountSecret,
+							Optional:   boolPtr(false),
+						}},
+					}},
+				},
+			},
+		},
+	}
+
+	if err := controllerutil.SetControllerReference(pipeline, job, r.Scheme); err != nil {
+		return err
+	}
+
+	existingJob := &batchv1.Job{}
+	if err := r.Get(ctx, types.NamespacedName{Name: jobName, Namespace: pipeline.Namespace}, existingJob); err == nil {
+		log.Info("Cloud Build trigger job already exists", "job", jobName)
+		return nil
+	} else if !errors.IsNotFound(err) {
+		return err
+	}
+
+	log.Info("Creating Cloud Build trigger job", "job", jobName, "image", targetImage)
+	return r.Create(ctx, job)
+}
+
+// reconcileBuildTier1 is the original Tier 1 in-cluster builder logic
+func (r *PipelineReconciler) reconcileBuildTier1(ctx context.Context, pipeline *clothov1alpha1.Pipeline) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+
+	if pipeline.Spec.Image != "" {
+		return ctrl.Result{}, nil
+	}
+
+	jobName := fmt.Sprintf("builder-%s", pipeline.Name)
+	existingJob := &batchv1.Job{}
+	err := r.Get(ctx, types.NamespacedName{Name: jobName, Namespace: pipeline.Namespace}, existingJob)
+	if err == nil {
+		if existingJob.Status.Succeeded > 0 {
+			targetImage := existingJob.Annotations["clotho.run/target-image"]
+			if targetImage == "" {
+				targetImage = fmt.Sprintf("%s/%s:%s", internalRegistry, pipeline.Name, pipeline.Spec.Reference)
+			}
+			log.Info("Build job completed, updating image", "image", targetImage)
+			pipeline.Spec.Image = targetImage
+			return ctrl.Result{}, r.Update(ctx, pipeline)
+		}
+		if existingJob.Status.Failed > 0 {
+			log.Info("Build job failed", "job", jobName)
+			return ctrl.Result{}, nil
+		}
+		log.Info("Build job still running", "job", jobName)
+		return ctrl.Result{RequeueAfter: time.Second * 10}, nil
+	}
+	if !errors.IsNotFound(err) {
+		return ctrl.Result{}, err
+	}
+
+	log.Info("Creating in-cluster build job (Tier 1)", "pipeline", pipeline.Name)
+	return r.createBuilderJob(ctx, pipeline)
+}
+
+func (r *PipelineReconciler) createBuilderJob(ctx context.Context, pipeline *clothov1alpha1.Pipeline) (ctrl.Result, error) {
+	jobName := fmt.Sprintf("builder-%s", pipeline.Name)
+	targetImage := fmt.Sprintf("%s/%s:%s", internalRegistry, pipeline.Name, pipeline.Spec.Reference)
+
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName,
+			Namespace: pipeline.Namespace,
+			Annotations: map[string]string{
+				"clotho.run/pipeline":     pipeline.Name,
+				"clotho.run/target-image": targetImage,
+			},
+		},
+		Spec: batchv1.JobSpec{
+			TTLSecondsAfterFinished: int32Ptr(3600),
+			BackoffLimit:            int32Ptr(0),
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers: []corev1.Container{{
+						Name:  "builder",
+						Image: "ghcr.io/brettnesbitt/clotho-builder:latest",
+						Env:   r.buildEnvVars(pipeline),
+					}},
+				},
+			},
+		},
+	}
+
+	if err := controllerutil.SetControllerReference(pipeline, job, r.Scheme); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	existing := &batchv1.Job{}
+	if err := r.Get(ctx, types.NamespacedName{Name: jobName, Namespace: pipeline.Namespace}, existing); err == nil {
+		return ctrl.Result{RequeueAfter: time.Second * 10}, nil
+	} else if !errors.IsNotFound(err) {
 		return ctrl.Result{}, err
 	}
 
