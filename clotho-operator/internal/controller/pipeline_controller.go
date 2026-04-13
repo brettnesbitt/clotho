@@ -699,7 +699,7 @@ func (r *PipelineReconciler) triggerCloudBuild(ctx context.Context, pipeline *cl
 							cd /tmp/repo/%s
 							# Bundle clotho dependency for Cloud Build
 							if [ -f Cargo.toml ] && grep -q "clotho" Cargo.toml; then
-								git clone --depth 1 --branch spinkube-updates "https://${GIT_TOKEN}@github.com/brettnesbitt/clotho.git" vendor-clotho
+								git clone --depth 1 --branch main "https://${GIT_TOKEN}@github.com/brettnesbitt/clotho.git" vendor-clotho
 								sed -i "s|\.\./\.\./\.\./clotho|vendor-clotho|g" Cargo.toml
 							fi
 							gcloud builds submit . \
