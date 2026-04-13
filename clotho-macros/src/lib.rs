@@ -78,6 +78,7 @@ fn impl_daemon_entrypoint(input_fn: ItemFn) -> TokenStream {
                         .build())
                 },
                 Err(e) => {
+                    eprintln!("[Clotho] Pipeline FAILED: {:#}", e);
                     // Set a failure report if the runners didn't already
                     ::clotho::telemetry::set_execution_report(::clotho::telemetry::ExecutionReport {
                         pipeline_id: pipeline_id.clone(),
