@@ -25,6 +25,11 @@ impl AppState {
     fn collection(&self, name: &str) -> Collection<Document> {
         self.client.database(&self.database).collection::<Document>(name)
     }
+
+    /// Get collection from a specific database (for multi-db routing)
+    fn collection_in_db(&self, db: &str, name: &str) -> Collection<Document> {
+        self.client.database(db).collection::<Document>(name)
+    }
 }
 
 // ── Request / Response types ─────────────────────────────────────────────────
@@ -580,6 +585,134 @@ async fn delete_many(
     }
 }
 
+// ── SDK-compatible MongoDB handlers (with database in path) ────────────────
+
+#[derive(Deserialize)]
+struct MongoInsertRequest {
+    document: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct MongoInsertManyRequest {
+    documents: Vec<serde_json::Value>,
+    #[serde(default)]
+    ordered: bool,
+}
+
+async fn mongo_insert_one(
+    State(state): State<AppState>,
+    Path((db, collection)): Path<(String, String)>,
+    Json(body): Json<MongoInsertRequest>,
+) -> impl IntoResponse {
+    let col = state.collection_in_db(&db, &collection);
+    match json_to_doc(&body.document) {
+        Ok(doc) => match col.insert_one(doc, None).await {
+            Ok(result) => (
+                StatusCode::CREATED,
+                Json(DataResponse {
+                    ok: true,
+                    data: Some(serde_json::json!({
+                        "inserted_id": result.inserted_id.to_string()
+                    })),
+                    count: Some(1),
+                    error: None,
+                }),
+            ),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(DataResponse {
+                    ok: false,
+                    data: None,
+                    count: None,
+                    error: Some(e.to_string()),
+                }),
+            ),
+        },
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(DataResponse {
+                ok: false,
+                data: None,
+                count: None,
+                error: Some(format!("Invalid JSON: {}", e)),
+            }),
+        ),
+    }
+}
+
+async fn mongo_insert_many(
+    State(state): State<AppState>,
+    Path((db, collection)): Path<(String, String)>,
+    Json(body): Json<MongoInsertManyRequest>,
+) -> impl IntoResponse {
+    let col = state.collection_in_db(&db, &collection);
+    let docs: Vec<Document> = body
+        .documents
+        .iter()
+        .filter_map(|v| json_to_doc(v).ok())
+        .collect();
+
+    if docs.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(DataResponse {
+                ok: false,
+                data: None,
+                count: None,
+                error: Some("No valid documents to insert".into()),
+            }),
+        );
+    }
+
+    // Use ordered option from request (default: false for speed)
+    let opts = mongodb::options::InsertManyOptions::builder()
+        .ordered(body.ordered)
+        .build();
+
+    match col.insert_many(docs, opts).await {
+        Ok(result) => (
+            StatusCode::CREATED,
+            Json(DataResponse {
+                ok: true,
+                data: Some(serde_json::json!({
+                    "inserted_count": result.inserted_ids.len(),
+                    "inserted_ids": result.inserted_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+                })),
+                count: Some(result.inserted_ids.len() as i64),
+                error: None,
+            }),
+        ),
+        Err(e) => {
+            // Check if this is a bulk write error (some docs may have succeeded)
+            if let Some(bwe) = e.as_any().downcast_ref::<mongodb::error::BulkWriteFailure>() {
+                let inserted = bwe.write_concern_error.as_ref().map(|_| 0).unwrap_or(0)
+                    + bwe.write_errors.as_ref().map(|v| v.len() as i64).unwrap_or(0);
+                return (
+                    StatusCode::CREATED,
+                    Json(DataResponse {
+                        ok: true,
+                        data: Some(serde_json::json!({
+                            "inserted_count": body.documents.len() as i64 - inserted,
+                            "duplicate_count": inserted,
+                        })),
+                        count: Some(body.documents.len() as i64 - inserted),
+                        error: None,
+                    }),
+                );
+            }
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(DataResponse {
+                    ok: false,
+                    data: None,
+                    count: None,
+                    error: Some(e.to_string()),
+                }),
+            )
+        }
+    }
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -621,6 +754,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/healthz", get(healthz))
+        // Legacy routes (default database from MONGO_DB env)
         .route("/v1/data/:collection", get(query_documents))
         .route("/v1/data/:collection", post(insert_document))
         .route("/v1/data/:collection/bulk", post(bulk_insert))
@@ -632,6 +766,9 @@ async fn main() {
         .route("/v1/data/:collection/:id", post(update_document))
         .route("/v1/data/:collection/:id/upsert", post(upsert_document))
         .route("/v1/data/:collection/:id", delete(delete_document))
+        // SDK-compatible routes with database parameter
+        .route("/v1/mongo/:db/:collection/insert", post(mongo_insert_one))
+        .route("/v1/mongo/:db/:collection/insert-many", post(mongo_insert_many))
         .with_state(state);
 
     info!(addr = %addr, "Clotho Data Proxy starting");

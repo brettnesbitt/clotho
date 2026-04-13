@@ -321,7 +321,7 @@ impl Sink<serde_json::Value> for MongoSink {
         });
 
         let res = self.http_client
-            .post(&format!("{}/v1/mongo/insert", self.proxy_url()))
+            .post(&format!("{}/v1/mongo/{}/{}/insert", self.proxy_url(), self.db, self.coll))
             .json(&payload)?
             .send()
             .await?;
@@ -378,7 +378,7 @@ impl Sink<Vec<serde_json::Value>> for MongoSink {
         });
 
         let res = self.http_client
-            .post(&format!("{}/v1/mongo/insert-many", self.proxy_url()))
+            .post(&format!("{}/v1/mongo/{}/{}/insert-many", self.proxy_url(), self.db, self.coll))
             .json(&payload)?
             .send()
             .await?;
