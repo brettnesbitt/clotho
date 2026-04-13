@@ -18,6 +18,7 @@ pub struct OncePipeline<T> {
     transform_steps: Vec<StepInfo>, // Track step info for each transform
     step_metrics: HashMap<String, StepMetrics>, // Cumulative metrics per step
     step_counter: AtomicU64, // For auto-naming steps
+    record_count: u64, // Actual record count for batch payloads
 }
 
 impl<T> OncePipeline<T> 
@@ -31,7 +32,16 @@ where T: Send + Sync + 'static
             transform_steps: Vec::new(),
             step_metrics: HashMap::new(),
             step_counter: AtomicU64::new(0),
+            record_count: 1,
         }
+    }
+
+    /// Override the record count reported in telemetry.
+    /// Use this when the payload is a batch (e.g. Vec<Value>) so metrics show
+    /// the actual number of records processed rather than 1.
+    pub fn with_record_count(mut self, count: u64) -> Self {
+        self.record_count = count;
+        self
     }
 
     /// Get the next step index for auto-naming
@@ -201,8 +211,8 @@ where T: Send + Sync + 'static
             started_at: String::new(),
             duration_ms: runtime_ms,
             status: "completed".into(),
-            records_in: 1,
-            records_out: 1,
+            records_in: self.record_count,
+            records_out: self.record_count,
             records_failed: 0,
             records_branched: 0,
             bytes_processed: 0,

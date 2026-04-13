@@ -622,6 +622,10 @@ spec:
                   Used by the scheduler to determine when the next invocation should occur.
                 format: date-time
                 type: string
+              message:
+                description: Message provides a human-readable explanation of the
+                  current phase or error state.
+                type: string
               observedGeneration:
                 description: ObservedGeneration represents the .metadata.generation
                   that the condition was set based upon.
