@@ -205,7 +205,7 @@ impl Source<serde_json::Value> for MongoSource {
     }
 }
 
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", feature = "batch"))]
 #[async_trait]
 impl Source<DataFrame> for MongoSource {
     async fn next(&mut self) -> Option<Result<Context<DataFrame>>> {
@@ -407,7 +407,7 @@ impl Sink<Vec<serde_json::Value>> for MongoSink {
 
 // ── Sink<DataFrame> — batch engine (native only) ────────────────────────────
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "batch"))]
 #[async_trait]
 impl Sink<DataFrame> for MongoSink {
     async fn write(&mut self, mut ctx: Context<DataFrame>) -> Result<()> {
