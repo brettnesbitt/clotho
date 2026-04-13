@@ -313,6 +313,9 @@ impl Sink<serde_json::Value> for MongoSink {
 #[async_trait(?Send)]
 impl Sink<serde_json::Value> for MongoSink {
     async fn write(&mut self, ctx: Context<serde_json::Value>) -> Result<()> {
+        let url = format!("{}/v1/mongo/{}/{}/insert", self.proxy_url(), self.db, self.coll);
+        eprintln!("[MongoSink] POST {} (1 doc)", url);
+
         let payload = serde_json::json!({
             "uri": &self.uri,
             "database": &self.db,
@@ -320,11 +323,18 @@ impl Sink<serde_json::Value> for MongoSink {
             "document": ctx.data,
         });
 
-        let res = self.http_client
-            .post(&format!("{}/v1/mongo/{}/{}/insert", self.proxy_url(), self.db, self.coll))
+        let res = match self.http_client
+            .post(&url)
             .json(&payload)?
             .send()
-            .await?;
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[MongoSink] HTTP error: {:#}", e);
+                return Err(e);
+            }
+        };
 
         if !res.is_success() {
             let status = res.status();
@@ -369,6 +379,9 @@ impl Sink<Vec<serde_json::Value>> for MongoSink {
     async fn write(&mut self, ctx: Context<Vec<serde_json::Value>>) -> Result<()> {
         if ctx.data.is_empty() { return Ok(()); }
 
+        let url = format!("{}/v1/mongo/{}/{}/insert-many", self.proxy_url(), self.db, self.coll);
+        eprintln!("[MongoSink] POST {} ({} docs)", url, ctx.data.len());
+
         let payload = serde_json::json!({
             "uri": &self.uri,
             "database": &self.db,
@@ -377,11 +390,18 @@ impl Sink<Vec<serde_json::Value>> for MongoSink {
             "ordered": false,
         });
 
-        let res = self.http_client
-            .post(&format!("{}/v1/mongo/{}/{}/insert-many", self.proxy_url(), self.db, self.coll))
+        let res = match self.http_client
+            .post(&url)
             .json(&payload)?
             .send()
-            .await?;
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[MongoSink] HTTP error: {:#}", e);
+                return Err(e);
+            }
+        };
 
         if !res.is_success() {
             let status = res.status();
