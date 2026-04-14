@@ -272,8 +272,8 @@ where
         K: Sink<T>,
         T: serde::Serialize + Clone
     {
-        let pipeline_id = std::env::var("PIPELINE_ID")
-            .or_else(|_| std::env::var("CLOTHO_PIPELINE_ID"))
+        let pipeline_id = crate::config::var("CLOTHO_PIPELINE_ID")
+            .or_else(|_| crate::config::var("PIPELINE_ID"))
             .unwrap_or_else(|_| "unknown".into());
 
         telemetry::mark_birth();

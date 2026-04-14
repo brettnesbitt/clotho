@@ -96,7 +96,7 @@ where T: Send + Sync + 'static
         K: Sink<T>,
         T: serde::Serialize // Required for DLQ
     {
-        let pipeline_id = std::env::var("CLOTHO_PIPELINE_ID").unwrap_or("webhook".into());
+        let pipeline_id = crate::config::var("CLOTHO_PIPELINE_ID").unwrap_or_else(|_| "webhook".into());
         let boot_ms = telemetry::uptime_ms();
         let start_time = std::time::Instant::now();
 
@@ -198,7 +198,42 @@ where T: Send + Sync + 'static
         if let Some(ctx) = current {
             let ttfr_ms = telemetry::uptime_ms();
             telemetry::emit_lifecycle(&pipeline_id, "FIRST_WRITE", None, Some(ttfr_ms));
-            sink.write(ctx).await?;
+
+            // Set report BEFORE sink attempt so counts are captured even on failure
+            telemetry::set_execution_report(crate::telemetry::ExecutionReport {
+                pipeline_id: pipeline_id.clone(),
+                started_at: String::new(),
+                duration_ms: ttfr_ms,
+                status: "running".into(),
+                records_in: self.record_count,
+                records_out: 0,
+                records_failed: 0,
+                records_branched: 0,
+                bytes_processed: 0,
+                log_lines: vec![],
+            });
+
+            if let Err(e) = sink.write(ctx).await {
+                // Sink failed — update report with failure status
+                let elapsed = start_time.elapsed();
+                let runtime_ms = elapsed.as_millis() as u64;
+                let error_msg = e.to_string();
+                eprintln!("[Clotho] Sink FAILED: {}", error_msg);
+
+                telemetry::set_execution_report(crate::telemetry::ExecutionReport {
+                    pipeline_id: pipeline_id.clone(),
+                    started_at: String::new(),
+                    duration_ms: runtime_ms,
+                    status: "failed".into(),
+                    records_in: self.record_count,
+                    records_out: 0,
+                    records_failed: self.record_count,
+                    records_branched: 0,
+                    bytes_processed: 0,
+                    log_lines: vec![format!("Sink error: {}", error_msg)],
+                });
+                return Err(e);
+            }
         }
 
         let elapsed = start_time.elapsed();
