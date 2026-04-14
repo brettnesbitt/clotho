@@ -1,4 +1,5 @@
 use serde::{Serialize, Deserialize};
+#[cfg(not(target_family = "wasm"))]
 use std::net::UdpSocket;
 use std::sync::{OnceLock, Mutex};
 use std::sync::atomic::AtomicU64;
@@ -6,6 +7,85 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const AGENT_UDP_PORT: u16 = 8125;
 const AGENT_HTTP_PORT: u16 = 8126;
+
+// --- WASM Event Buffer ---
+// On WASM, UDP is unavailable. Events are buffered here and flushed
+// via HTTP to the agent at the end of pipeline execution.
+static EVENT_BUFFER: OnceLock<Mutex<Vec<serde_json::Value>>> = OnceLock::new();
+
+fn event_buffer() -> &'static Mutex<Vec<serde_json::Value>> {
+    EVENT_BUFFER.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Buffer a serializable telemetry event (WASM path).
+fn buffer_event<T: Serialize>(event: &T) {
+    if let Ok(value) = serde_json::to_value(event) {
+        if let Ok(mut buf) = event_buffer().lock() {
+            buf.push(value);
+        }
+    }
+}
+
+/// Drain all buffered telemetry events. Called by flush_telemetry_http().
+pub fn take_buffered_events() -> Vec<serde_json::Value> {
+    event_buffer().lock().ok()
+        .map(|mut buf| std::mem::take(&mut *buf))
+        .unwrap_or_default()
+}
+
+/// Send a serialized telemetry event to the agent.
+/// Native: fire-and-forget UDP. WASM: buffer for later HTTP flush.
+fn send_event<T: Serialize>(event: &T) {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let addr = agent_addr();
+        if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
+            if let Ok(data) = serde_json::to_vec(event) {
+                let _ = socket.send_to(&data, &addr);
+            }
+        }
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        buffer_event(event);
+    }
+}
+
+/// Flush all buffered telemetry events to the agent via HTTP POST.
+/// Called at the end of pipeline execution in once.rs / stream.rs.
+/// No-op on native (events are sent immediately via UDP).
+pub async fn flush_telemetry_http() {
+    #[cfg(target_family = "wasm")]
+    {
+        let events = take_buffered_events();
+        if events.is_empty() {
+            return;
+        }
+        let url = format!("{}/v1/telemetry/events", agent_http_addr());
+        eprintln!("[Clotho Telemetry] flushing {} events to {}", events.len(), url);
+
+        let body = match serde_json::to_vec(&events) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("[Clotho Telemetry] flush serialize error: {}", e);
+                return;
+            }
+        };
+
+        use spin_sdk::http::{send, Method, Request};
+        let req = Request::builder()
+            .method(Method::Post)
+            .uri(&url)
+            .header("content-type", "application/json")
+            .body(body)
+            .build();
+        match send(req).await {
+            Ok(resp) => eprintln!("[Clotho Telemetry] flush -> {} ({} events)", resp.status(), events.len()),
+            Err(e) => eprintln!("[Clotho Telemetry] flush failed: {} (events lost)", e),
+        }
+    }
+    // Native: no-op, events already sent via UDP
+}
 
 /// Step info for tracking pipeline steps in the DAG
 #[derive(Clone, Debug)]
@@ -24,13 +104,14 @@ pub struct StepMetrics {
     pub records_failed: AtomicU64,
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn agent_addr() -> String {
     let host = std::env::var("CLOTHO_AGENT_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     format!("{}:{}", host, AGENT_UDP_PORT)
 }
 
 fn agent_http_addr() -> String {
-    let host = std::env::var("CLOTHO_AGENT_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let host = crate::config::var_or("CLOTHO_AGENT_HOST", "127.0.0.1");
     format!("http://{}:{}", host, AGENT_HTTP_PORT)
 }
 
@@ -75,6 +156,7 @@ pub fn execution_report_json() -> Option<Vec<u8>> {
 
 /// Initialize the native telemetry agent (UDP sender to DaemonSet).
 /// Called by the #[clotho::daemon] macro at process startup.
+#[cfg(not(target_family = "wasm"))]
 pub fn init_native_agent() {
     mark_birth();
     eprintln!("[Clotho Telemetry] Native agent initialized (UDP -> {})", agent_addr());
@@ -163,12 +245,7 @@ pub fn emit_lifecycle_with_runtime(pipeline_id: &str, event: &str, boot_ms: Opti
         },
     };
 
-    let addr = agent_addr();
-    if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
-        if let Ok(data) = serde_json::to_vec(&envelope) {
-            let _ = socket.send_to(&data, &addr);
-        }
-    }
+    send_event(&envelope);
 }
 
 /// Emit an error event via UDP to the agent.
@@ -223,12 +300,7 @@ pub fn emit_throughput_with_branched(pipeline_id: &str, records_in: u64, records
         },
     };
 
-    let addr = agent_addr();
-    if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
-        if let Ok(data) = serde_json::to_vec(&event) {
-            let _ = socket.send_to(&data, &addr);
-        }
-    }
+    send_event(&event);
 }
 
 /// Report progress (rows processed so far). Used by batch pipelines.
@@ -276,12 +348,7 @@ pub fn emit_dlq_record(pipeline_id: &str, trace_id: &str, step: &str, error: &st
         },
     };
 
-    let addr = agent_addr();
-    if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
-        if let Ok(data) = serde_json::to_vec(&event) {
-            let _ = socket.send_to(&data, &addr);
-        }
-    }
+    send_event(&event);
     // Silent fail — never crash the pipeline because the dashboard is down
 }
 
@@ -340,12 +407,7 @@ pub fn emit_step_metrics(
         },
     };
 
-    let addr = agent_addr();
-    if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
-        if let Ok(data) = serde_json::to_vec(&event) {
-            let _ = socket.send_to(&data, &addr);
-        }
-    }
+    send_event(&event);
 }
 
 /// Data sample payload
@@ -388,12 +450,7 @@ pub fn emit_data_sample(
         },
     };
 
-    let addr = agent_addr();
-    if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
-        if let Ok(data) = serde_json::to_vec(&event) {
-            let _ = socket.send_to(&data, &addr);
-        }
-    }
+    send_event(&event);
 }
 
 /// Data quality event payload
@@ -439,10 +496,5 @@ pub fn emit_data_quality(pipeline_id: &str, rule: &str, status: crate::types::Co
         },
     };
 
-    let addr = agent_addr();
-    if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
-        if let Ok(data) = serde_json::to_vec(&event) {
-            let _ = socket.send_to(&data, &addr);
-        }
-    }
+    send_event(&event);
 }
