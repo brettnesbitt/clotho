@@ -676,26 +676,28 @@ async fn mongo_insert_many(
                 ok: true,
                 data: Some(serde_json::json!({
                     "inserted_count": result.inserted_ids.len(),
-                    "inserted_ids": result.inserted_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+                    "inserted_ids": result.inserted_ids.values().map(|id| id.to_string()).collect::<Vec<_>>(),
                 })),
                 count: Some(result.inserted_ids.len() as i64),
                 error: None,
             }),
         ),
         Err(e) => {
-            // Check if this is a bulk write error (some docs may have succeeded)
-            if let Some(bwe) = e.as_any().downcast_ref::<mongodb::error::BulkWriteFailure>() {
-                let inserted = bwe.write_concern_error.as_ref().map(|_| 0).unwrap_or(0)
-                    + bwe.write_errors.as_ref().map(|v| v.len() as i64).unwrap_or(0);
+            // Check for duplicate key errors (code 11000) — partial success case
+            use mongodb::error::ErrorKind;
+            if let ErrorKind::BulkWrite(ref bwe) = *e.kind {
+                let write_errors = bwe.write_errors.as_ref();
+                let error_count = write_errors.map(|v: &Vec<_>| v.len() as i64).unwrap_or(0);
+                let inserted_count = body.documents.len() as i64 - error_count;
                 return (
                     StatusCode::CREATED,
                     Json(DataResponse {
                         ok: true,
                         data: Some(serde_json::json!({
-                            "inserted_count": body.documents.len() as i64 - inserted,
-                            "duplicate_count": inserted,
+                            "inserted_count": inserted_count,
+                            "duplicate_count": error_count,
                         })),
-                        count: Some(body.documents.len() as i64 - inserted),
+                        count: Some(inserted_count),
                         error: None,
                     }),
                 );

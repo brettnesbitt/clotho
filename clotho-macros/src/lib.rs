@@ -53,7 +53,7 @@ fn impl_daemon_entrypoint(input_fn: ItemFn) -> TokenStream {
         ) -> anyhow::Result<impl spin_sdk::http::IntoResponse> {
             // A. Static Init
             ::clotho::telemetry::mark_birth();
-            let pipeline_id = std::env::var("CLOTHO_PIPELINE_ID")
+            let pipeline_id = ::clotho::config::var("CLOTHO_PIPELINE_ID")
                 .unwrap_or_else(|_| "pipeline".into());
 
             // B. Run User Pipeline Code (runners set ExecutionReport internally)
@@ -116,7 +116,7 @@ fn impl_webhook_entrypoint(input_fn: ItemFn) -> TokenStream {
         async fn _clotho_generated_handler(#inputs) -> anyhow::Result<impl spin_sdk::http::IntoResponse> {
             // A. Static Init
             ::clotho::telemetry::mark_birth();
-            let pipeline_id = std::env::var("CLOTHO_PIPELINE_ID").unwrap_or_else(|_| "http-trigger".into());
+            let pipeline_id = ::clotho::config::var("CLOTHO_PIPELINE_ID").unwrap_or_else(|_| "http-trigger".into());
 
             // B. Run User Code (Measured — runners set ExecutionReport internally)
             let start = std::time::Instant::now();
