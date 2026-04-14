@@ -491,6 +491,7 @@ where
                         records_out += 1;
                         if let Err(e) = sink.write(ctx).await {
                             eprintln!("[Clotho] Sink write failed: {}", e);
+                            telemetry::flush_telemetry_http().await;
                             return Err(e);
                         }
                     }
@@ -532,6 +533,9 @@ where
             bytes_processed,
             log_lines: vec![],
         });
+
+        // Flush buffered telemetry events to agent (WASM: HTTP POST, native: no-op)
+        telemetry::flush_telemetry_http().await;
 
         Ok(())
     }

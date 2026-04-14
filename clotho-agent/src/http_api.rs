@@ -5,8 +5,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
 use crate::execution_store::{ExecutionBuffer, ExecutionRecord};
+use crate::{AgentState, TelemetryEvent, process_sdk_event};
 
 pub type SharedBuffer = Arc<Mutex<ExecutionBuffer>>;
+pub type SharedAgentState = Arc<Mutex<AgentState>>;
+
+/// Combined state for all HTTP handlers.
+#[derive(Clone)]
+pub struct AppState {
+    pub buffer: SharedBuffer,
+    pub agent: SharedAgentState,
+}
 
 /// Payload the SDK POSTs after each execution completes.
 #[derive(Deserialize, Debug)]
@@ -28,6 +37,12 @@ struct IngestResponse {
     buffered: usize,
 }
 
+#[derive(Serialize)]
+struct TelemetryResponse {
+    status: String,
+    processed: usize,
+}
+
 /// GET /healthz
 async fn healthz() -> &'static str {
     "ok"
@@ -36,7 +51,7 @@ async fn healthz() -> &'static str {
 /// POST /v1/execution — SDK reports execution results here.
 /// Buffered in memory, forwarded to Control Plane on next flush cycle.
 async fn ingest_execution(
-    State(buffer): State<SharedBuffer>,
+    State(state): State<AppState>,
     Json(report): Json<SdkExecutionReport>,
 ) -> Result<Json<IngestResponse>, StatusCode> {
     let now_secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
@@ -52,16 +67,41 @@ async fn ingest_execution(
         log_lines: report.log_lines,
     };
 
-    let mut buf = buffer.lock().await;
+    let mut buf = state.buffer.lock().await;
     buf.push(record);
     let count = buf.len();
     eprintln!("[http] buffered execution for {} ({} pending)", report.pipeline_id, count);
     Ok(Json(IngestResponse { status: "ok".into(), buffered: count }))
 }
 
-pub fn build_router(buffer: SharedBuffer) -> Router {
+/// POST /v1/telemetry/events — WASM pipelines batch-send telemetry events here.
+/// Events are deserialized and processed through the same pipeline as UDP events.
+/// Fire-and-forget from the SDK side; always returns 200.
+async fn ingest_telemetry_events(
+    State(state): State<AppState>,
+    Json(events): Json<Vec<serde_json::Value>>,
+) -> Json<TelemetryResponse> {
+    let mut processed = 0usize;
+    for value in &events {
+        match serde_json::from_value::<TelemetryEvent>(value.clone()) {
+            Ok(event) => {
+                process_sdk_event(&state.agent, event).await;
+                processed += 1;
+            }
+            Err(e) => {
+                eprintln!("[http] failed to parse telemetry event: {} — {:?}", e, value);
+            }
+        }
+    }
+    eprintln!("[http] ingested {}/{} telemetry events via HTTP", processed, events.len());
+    Json(TelemetryResponse { status: "ok".into(), processed })
+}
+
+pub fn build_router(buffer: SharedBuffer, agent: SharedAgentState) -> Router {
+    let state = AppState { buffer, agent };
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/execution", post(ingest_execution))
-        .with_state(buffer)
+        .route("/v1/telemetry/events", post(ingest_telemetry_events))
+        .with_state(state)
 }

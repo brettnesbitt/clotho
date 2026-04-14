@@ -33,7 +33,7 @@ fn extract_pipeline_name(pod_name: &str) -> String {
 // --- 1. Protocol Types (SDK -> Agent) ---
 #[derive(Deserialize, Serialize, Debug, Clone)] 
 #[serde(tag = "type", content = "payload")]
-enum TelemetryEvent {
+pub(crate) enum TelemetryEvent {
     Handshake(HandshakeEvent),
     Lifecycle(LifecycleEvent),
     Progress(ProgressEvent),
@@ -45,13 +45,13 @@ enum TelemetryEvent {
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
-struct HandshakeEvent {
+pub(crate) struct HandshakeEvent {
     sdk_version: String,
     pipeline_id: String,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
-struct LifecycleEvent {
+pub(crate) struct LifecycleEvent {
     pipeline_id: String,
     event: String,
     timestamp: u64,
@@ -61,20 +61,20 @@ struct LifecycleEvent {
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
-struct ProgressEvent {
+pub(crate) struct ProgressEvent {
     pipeline_id: String,
     current: u64,
     total: Option<u64>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
-struct DataQualityEvent {
+pub(crate) struct DataQualityEvent {
     contract: serde_json::Value,
     timestamp: u64,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
-struct ThroughputEvent {
+pub(crate) struct ThroughputEvent {
     pipeline_id: String,
     records_in: u64,
     records_out: u64,
@@ -84,7 +84,7 @@ struct ThroughputEvent {
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
-struct DlqEvent {
+pub(crate) struct DlqEvent {
     pipeline_id: String,
     trace_id: String,
     error: String,
@@ -94,7 +94,7 @@ struct DlqEvent {
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
-struct StepMetricsEvent {
+pub(crate) struct StepMetricsEvent {
     pipeline_id: String,
     stage_name: String,
     step_name: String,
@@ -109,7 +109,7 @@ struct StepMetricsEvent {
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
-struct DataSampleEvent {
+pub(crate) struct DataSampleEvent {
     pipeline_id: String,
     stage_name: String,
     step_name: String,
@@ -141,7 +141,7 @@ struct ResourceStats {
 }
 
 // --- 3. Shared State ---
-struct AgentState {
+pub(crate) struct AgentState {
     // Buffer for events before flushing to API
     // Map<PipelineID, Vec<Events>>
     event_buffer: HashMap<String, Vec<ApiEvent>>,
@@ -183,11 +183,12 @@ async fn main() -> Result<()> {
         api_url,
     }));
 
-    // --- TASK 0: HTTP API (SDK execution reports) ---
+    // --- TASK 0: HTTP API (SDK execution reports + WASM telemetry events) ---
     let http_port: u16 = std::env::var("CLOTHO_HTTP_PORT").unwrap_or("8126".into()).parse().unwrap_or(8126);
     let http_buffer = exec_buffer.clone();
+    let http_state = state.clone();
     tokio::spawn(async move {
-        let app = http_api::build_router(http_buffer);
+        let app = http_api::build_router(http_buffer, http_state);
         let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", http_port)).await.unwrap();
         eprintln!("[http] listening on 0.0.0.0:{}", http_port);
         axum::serve(listener, app).await.unwrap();
@@ -262,7 +263,7 @@ async fn main() -> Result<()> {
 
 // --- Helpers ---
 
-async fn process_sdk_event(state: &Arc<Mutex<AgentState>>, event: TelemetryEvent) {
+pub(crate) async fn process_sdk_event(state: &Arc<Mutex<AgentState>>, event: TelemetryEvent) {
     let mut locked = state.lock().await;
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
 

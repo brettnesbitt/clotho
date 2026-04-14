@@ -232,6 +232,7 @@ where T: Send + Sync + 'static
                     bytes_processed: 0,
                     log_lines: vec![format!("Sink error: {}", error_msg)],
                 });
+                telemetry::flush_telemetry_http().await;
                 return Err(e);
             }
         }
@@ -253,6 +254,9 @@ where T: Send + Sync + 'static
             bytes_processed: 0,
             log_lines: vec![],
         });
+
+        // Flush buffered telemetry events to agent (WASM: HTTP POST, native: no-op)
+        telemetry::flush_telemetry_http().await;
 
         Ok(())
     }
