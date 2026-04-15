@@ -1211,6 +1211,17 @@ func (r *PipelineReconciler) reconcileStage(ctx context.Context, pipeline *cloth
 		if stage.Entrypoint != "" && len(deploy.Spec.Template.Spec.Containers) > 0 {
 			deploy.Spec.Template.Spec.Containers[0].Command = []string{fmt.Sprintf("/app/%s", stage.Entrypoint)}
 		}
+		// Inject CLOTHO_STAGE_NAME so the SDK can tag step metrics with the stage.
+		// CLOTHO_PIPELINE_ID stays as the stage workload name (e.g. bluesky-sieve-ingestor)
+		// to keep per-stage telemetry_state docs separate and avoid write races.
+		// The API aggregates stage docs under the parent pipeline at query time.
+		if len(deploy.Spec.Template.Spec.Containers) > 0 {
+			deploy.Spec.Template.Spec.Containers[0].Env = append(
+				deploy.Spec.Template.Spec.Containers[0].Env,
+				corev1.EnvVar{Name: "CLOTHO_STAGE_NAME", Value: stage.Name},
+				corev1.EnvVar{Name: "CLOTHO_PARENT_PIPELINE", Value: pipeline.Name},
+			)
+		}
 		// Owner reference to the REAL parent pipeline (has a UID)
 		if err := ctrl.SetControllerReference(pipeline, deploy, r.Scheme); err != nil {
 			return err
@@ -1235,6 +1246,12 @@ func (r *PipelineReconciler) reconcileStage(ctx context.Context, pipeline *cloth
 			},
 			Spec: stageSpec,
 		})
+		// Inject CLOTHO_STAGE_NAME so the SDK can tag step metrics with the stage.
+		// CLOTHO_PIPELINE_ID stays as the stage workload name to avoid telemetry_state races.
+		spinApp.Spec.Variables = append(spinApp.Spec.Variables,
+			spinva1.SpinVar{Name: "CLOTHO_STAGE_NAME", Value: stage.Name},
+			spinva1.SpinVar{Name: "CLOTHO_PARENT_PIPELINE", Value: pipeline.Name},
+		)
 		// Owner reference to the REAL parent pipeline (has a UID)
 		if err := ctrl.SetControllerReference(pipeline, spinApp, r.Scheme); err != nil {
 			return err

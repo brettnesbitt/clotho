@@ -275,6 +275,7 @@ where
         let pipeline_id = crate::config::var("CLOTHO_PIPELINE_ID")
             .or_else(|_| crate::config::var("PIPELINE_ID"))
             .unwrap_or_else(|_| "unknown".into());
+        let stage_name = crate::config::var_or("CLOTHO_STAGE_NAME", "");
 
         telemetry::mark_birth();
         let boot_ms = telemetry::uptime_ms();
@@ -367,7 +368,7 @@ where
                                     let payload_out_str = serde_json::to_string(&new_ctx.data).unwrap_or_else(|_| "".into());
                                     telemetry::emit_data_sample(
                                         &pipeline_id,
-                                        "", // stage_name
+                                        &stage_name,
                                         step_name,
                                         &payload_in_str,
                                         &payload_out_str,
@@ -378,7 +379,7 @@ where
                                 let duration_ms = step_start.elapsed().as_millis() as u64;
                                 telemetry::emit_step_metrics(
                                     &pipeline_id,
-                                    "", // stage_name - single stage for now
+                                    &stage_name,
                                     step_name,
                                     step_type,
                                     1, // records_in for this execution
@@ -412,7 +413,7 @@ where
                                     // Emit step metrics telemetry
                                     telemetry::emit_step_metrics(
                                         &pipeline_id,
-                                        "",
+                                        &stage_name,
                                         step_name,
                                         step_type,
                                         1,
@@ -439,7 +440,7 @@ where
                                 // Emit step metrics telemetry
                                 telemetry::emit_step_metrics(
                                     &pipeline_id,
-                                    "",
+                                    &stage_name,
                                     step_name,
                                     step_type,
                                     1,
