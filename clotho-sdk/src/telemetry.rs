@@ -72,14 +72,14 @@ pub async fn flush_telemetry_http() {
             }
         };
 
-        use spin_sdk::http::{send, Method, Request};
+        use spin_sdk::http::{send, Method, Request, Response};
         let req = Request::builder()
             .method(Method::Post)
             .uri(&url)
             .header("content-type", "application/json")
             .body(body)
             .build();
-        match send(req).await {
+        match send::<_, Response>(req).await {
             Ok(resp) => eprintln!("[Clotho Telemetry] flush -> {} ({} events)", resp.status(), events.len()),
             Err(e) => eprintln!("[Clotho Telemetry] flush failed: {} (events lost)", e),
         }
