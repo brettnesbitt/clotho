@@ -470,6 +470,7 @@ dependencies = [
  "async-nats",
  "async-trait",
  "bson",
+ "chrono",
  "clotho-macros",
  "futures-util",
  "lazy_static",

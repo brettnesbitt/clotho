@@ -195,6 +195,14 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+/// Get current timestamp as RFC3339/ISO8601 string for execution reports.
+pub fn now_rfc3339() -> String {
+    use std::time::SystemTime;
+    let now = SystemTime::now();
+    let datetime = chrono::DateTime::<chrono::Utc>::from(now);
+    datetime.to_rfc3339()
+}
+
 /// Lifecycle event payload matching agent's LifecycleEvent struct
 #[derive(Serialize)]
 struct LifecyclePayload {

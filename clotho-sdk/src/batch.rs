@@ -176,9 +176,11 @@ where S: Source<DataFrame> + 'static
         let pipeline_id = std::env::var("CLOTHO_PIPELINE_ID")
             .or_else(|_| std::env::var("PIPELINE_ID"))
             .unwrap_or_else(|_| "batch".into());
+        let stage_name = crate::config::var_or("CLOTHO_STAGE_NAME", "");
 
         let boot_ms = telemetry::uptime_ms();
         let start_time = std::time::Instant::now();
+        let started_at = crate::telemetry::now_rfc3339();
 
         eprintln!("[Clotho] Pipeline Started: {}", pipeline_id);
         eprintln!("[Clotho] Mode: Batch (columnar, Polars)");
@@ -233,7 +235,7 @@ where S: Source<DataFrame> + 'static
                                     // Emit step metrics telemetry
                                     telemetry::emit_step_metrics(
                                         &pipeline_id,
-                                        "", // stage_name
+                                        &stage_name,
                                         step_name,
                                         step_type,
                                         batch_rows,
@@ -260,7 +262,7 @@ where S: Source<DataFrame> + 'static
                                     // Emit step metrics telemetry
                                     telemetry::emit_step_metrics(
                                         &pipeline_id,
-                                        "",
+                                        &stage_name,
                                         step_name,
                                         step_type,
                                         batch_rows,
@@ -326,7 +328,7 @@ where S: Source<DataFrame> + 'static
 
         telemetry::set_execution_report(crate::telemetry::ExecutionReport {
             pipeline_id: pipeline_id.clone(),
-            started_at: String::new(),
+            started_at: started_at.clone(),
             duration_ms: runtime_ms,
             status: "completed".into(),
             records_in,

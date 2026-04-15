@@ -280,6 +280,7 @@ where
         telemetry::mark_birth();
         let boot_ms = telemetry::uptime_ms();
         let start_time = std::time::Instant::now();
+        let started_at = crate::telemetry::now_rfc3339();
 
         eprintln!("[Clotho] Pipeline Started: {}", pipeline_id);
         eprintln!("[Clotho] Mode: Stream (item-by-item, zero-copy)");
@@ -524,7 +525,7 @@ where
         // Store execution report for the macro to POST via HTTP
         telemetry::set_execution_report(crate::telemetry::ExecutionReport {
             pipeline_id: pipeline_id.clone(),
-            started_at: String::new(),
+            started_at: started_at.clone(),
             duration_ms: runtime_ms,
             status: "completed".into(),
             records_in,
