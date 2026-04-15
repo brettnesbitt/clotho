@@ -97,8 +97,10 @@ where T: Send + Sync + 'static
         T: serde::Serialize // Required for DLQ
     {
         let pipeline_id = crate::config::var("CLOTHO_PIPELINE_ID").unwrap_or_else(|_| "webhook".into());
+        let stage_name = crate::config::var_or("CLOTHO_STAGE_NAME", "");
         let boot_ms = telemetry::uptime_ms();
         let start_time = std::time::Instant::now();
+        let started_at = crate::telemetry::now_rfc3339();
 
         telemetry::emit_lifecycle(&pipeline_id, "STARTUP", Some(boot_ms), None);
 
@@ -139,7 +141,7 @@ where T: Send + Sync + 'static
                     // Emit step metrics telemetry
                     telemetry::emit_step_metrics(
                         &pipeline_id,
-                        "", // stage_name
+                        &stage_name,
                         step_name,
                         step_type,
                         1,
@@ -164,7 +166,7 @@ where T: Send + Sync + 'static
                     // Emit step metrics telemetry
                     telemetry::emit_step_metrics(
                         &pipeline_id,
-                        "",
+                        &stage_name,
                         step_name,
                         step_type,
                         1,
@@ -202,7 +204,7 @@ where T: Send + Sync + 'static
             // Set report BEFORE sink attempt so counts are captured even on failure
             telemetry::set_execution_report(crate::telemetry::ExecutionReport {
                 pipeline_id: pipeline_id.clone(),
-                started_at: String::new(),
+                started_at: started_at.clone(),
                 duration_ms: ttfr_ms,
                 status: "running".into(),
                 records_in: self.record_count,
@@ -222,7 +224,7 @@ where T: Send + Sync + 'static
 
                 telemetry::set_execution_report(crate::telemetry::ExecutionReport {
                     pipeline_id: pipeline_id.clone(),
-                    started_at: String::new(),
+                    started_at: started_at.clone(),
                     duration_ms: runtime_ms,
                     status: "failed".into(),
                     records_in: self.record_count,
@@ -244,7 +246,7 @@ where T: Send + Sync + 'static
 
         telemetry::set_execution_report(crate::telemetry::ExecutionReport {
             pipeline_id: pipeline_id.clone(),
-            started_at: String::new(),
+            started_at: started_at.clone(),
             duration_ms: runtime_ms,
             status: "completed".into(),
             records_in: self.record_count,
