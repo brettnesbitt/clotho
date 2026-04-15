@@ -269,6 +269,22 @@ type ImageBuildSpec struct {
 	// +kubebuilder:default:="10m"
 	// +optional
 	Timeout string `json:"timeout,omitempty"`
+
+	// MaxBuildRetries is the maximum number of times the operator will retry a
+	// failed build before marking the pipeline as BuildFailed and giving up.
+	// Set to 0 to disable retries entirely.
+	// +kubebuilder:default:=3
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=10
+	// +optional
+	MaxBuildRetries int32 `json:"maxBuildRetries,omitempty"`
+
+	// BuildBackoffBase is the base duration for exponential backoff between retries.
+	// Each retry waits BuildBackoffBase * 2^(attempt-1), capped at 30 minutes.
+	// Examples: "30s", "1m", "5m". Defaults to "1m".
+	// +kubebuilder:default:="1m"
+	// +optional
+	BuildBackoffBase string `json:"buildBackoffBase,omitempty"`
 }
 
 // PipelineStatus defines the observed state of Pipeline
@@ -293,6 +309,11 @@ type PipelineStatus struct {
 	// Used by the scheduler to determine when the next invocation should occur.
 	// +optional
 	LastInvocation *metav1.Time `json:"lastInvocation,omitempty"`
+
+	// BuildFailures is the number of consecutive build failures for this pipeline.
+	// Reset to 0 on a successful build. Used for exponential backoff.
+	// +optional
+	BuildFailures int32 `json:"buildFailures,omitempty"`
 }
 
 // +kubebuilder:object:root=true

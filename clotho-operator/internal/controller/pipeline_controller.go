@@ -598,14 +598,65 @@ func (r *PipelineReconciler) reconcileExternalBuild(ctx context.Context, pipelin
 			if pipeline.Spec.Image != targetImage {
 				log.Info("Tier 1.5: External build completed", "image", targetImage)
 				pipeline.Spec.Image = targetImage
+				// Reset failure counter on success
+				pipeline.Status.BuildFailures = 0
+				if updateErr := r.Status().Update(ctx, pipeline); updateErr != nil {
+					log.Error(updateErr, "Could not reset BuildFailures after successful build")
+				}
 				return ctrl.Result{}, r.Update(ctx, pipeline)
 			}
 			log.Info("Tier 1.5: External build already completed")
 			return ctrl.Result{}, nil
 		}
 		if existingJob.Status.Failed > 0 {
-			log.Info("Tier 1.5: External build failed")
-			return ctrl.Result{}, nil
+			// Determine retry limits from spec (defaults: max=3, base=1m)
+			maxRetries := buildConfig.MaxBuildRetries
+			if maxRetries == 0 {
+				maxRetries = 3
+			}
+			backoffBase := buildConfig.BuildBackoffBase
+			if backoffBase == "" {
+				backoffBase = "1m"
+			}
+
+			failures := pipeline.Status.BuildFailures + 1
+			pipeline.Status.BuildFailures = failures
+
+			if failures > maxRetries {
+				log.Info("Tier 1.5: Build exceeded max retries, marking BuildFailed",
+					"failures", failures, "maxRetries", maxRetries)
+				pipeline.Status.Phase = "BuildFailed"
+				pipeline.Status.Message = fmt.Sprintf("Build failed %d times (max %d). Manual intervention required.", failures, maxRetries)
+				if updateErr := r.Status().Update(ctx, pipeline); updateErr != nil {
+					log.Error(updateErr, "Could not update status to BuildFailed")
+				}
+				return ctrl.Result{}, nil
+			}
+
+			// Delete the failed job so the next reconcile creates a fresh one
+			if deleteErr := r.Delete(ctx, existingJob, client.PropagationPolicy(metav1.DeletePropagationBackground)); deleteErr != nil && !errors.IsNotFound(deleteErr) {
+				log.Error(deleteErr, "Could not delete failed build job")
+				return ctrl.Result{}, deleteErr
+			}
+
+			// Compute exponential backoff: base * 2^(failures-1), cap at 30m
+			baseDur, parseErr := time.ParseDuration(backoffBase)
+			if parseErr != nil {
+				baseDur = time.Minute
+			}
+			delay := baseDur * time.Duration(int64(1)<<uint(failures-1))
+			const maxDelay = 30 * time.Minute
+			if delay > maxDelay {
+				delay = maxDelay
+			}
+
+			if updateErr := r.Status().Update(ctx, pipeline); updateErr != nil {
+				log.Error(updateErr, "Could not increment BuildFailures")
+			}
+
+			log.Info("Tier 1.5: Build failed, will retry with backoff",
+				"attempt", failures, "maxRetries", maxRetries, "backoff", delay)
+			return ctrl.Result{RequeueAfter: delay}, nil
 		}
 		log.Info("Tier 1.5: External build still running, requeueing...")
 		return ctrl.Result{RequeueAfter: time.Second * 30}, nil

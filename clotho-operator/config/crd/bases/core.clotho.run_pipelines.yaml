@@ -69,6 +69,13 @@ spec:
                       BuildArgs are additional arguments passed to the build process.
                       For Cloud Build, these become substitution variables (_KEY=value).
                     type: object
+                  buildBackoffBase:
+                    default: 1m
+                    description: |-
+                      BuildBackoffBase is the base duration for exponential backoff between retries.
+                      Each retry waits BuildBackoffBase * 2^(attempt-1), capped at 30 minutes.
+                      Examples: "30s", "1m", "5m". Defaults to "1m".
+                    type: string
                   builder:
                     description: Builder specifies the external build service to use.
                     enum:
@@ -91,6 +98,16 @@ spec:
                       Dockerfile is the path to the Dockerfile (for container builds).
                       Defaults to "Dockerfile" in the repository root.
                     type: string
+                  maxBuildRetries:
+                    default: 3
+                    description: |-
+                      MaxBuildRetries is the maximum number of times the operator will retry a
+                      failed build before marking the pipeline as BuildFailed and giving up.
+                      Set to 0 to disable retries entirely.
+                    format: int32
+                    maximum: 10
+                    minimum: 0
+                    type: integer
                   registry:
                     description: |-
                       Registry is the target image registry where the built image will be pushed.
@@ -558,6 +575,12 @@ spec:
           status:
             description: PipelineStatus defines the observed state of Pipeline
             properties:
+              buildFailures:
+                description: |-
+                  BuildFailures is the number of consecutive build failures for this pipeline.
+                  Reset to 0 on a successful build. Used for exponential backoff.
+                format: int32
+                type: integer
               conditions:
                 description: Conditions provides detailed reasons for the current
                   state
