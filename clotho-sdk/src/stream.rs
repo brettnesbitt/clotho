@@ -293,6 +293,9 @@ where
         let mut bytes_processed: u64 = 0;
         let mut batch_counter: u64 = 0;
         let mut first_record = true;
+        let mut source_records_in: u64 = 0;
+        let mut sink_records_out: u64 = 0;
+        let source_step_start = std::time::Instant::now();
 
         while let Some(ctx_result) = self.source.next().await {
             if first_record {
@@ -303,6 +306,7 @@ where
             match ctx_result {
                 Ok(initial_ctx) => {
                     records_in += 1;
+                    source_records_in += 1;
                     
                     // Estimate bytes processed by serializing the payload
                     // This gives us a rough measure of data volume flowing through
@@ -315,6 +319,35 @@ where
                     // We wrap the context in an Option so we can safely take() ownership
                     // and pass it through the transform chain without cloning.
                     let mut current = Some(initial_ctx);
+
+                    // Emit source step metric (rate-limited: max 1 per second)
+                    let now_sec = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let should_emit_source = {
+                        let last = self.step_last_sample
+                            .entry("source".to_string())
+                            .or_insert_with(|| AtomicU64::new(0));
+                        if last.load(Ordering::Relaxed) < now_sec {
+                            last.store(now_sec, Ordering::Relaxed);
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if should_emit_source {
+                        telemetry::emit_step_metrics(
+                            &pipeline_id,
+                            &stage_name,
+                            "source",
+                            "source",
+                            source_records_in,
+                            source_records_in,
+                            0, 0, 0,
+                            source_step_start.elapsed().as_millis() as u64,
+                        );
+                    }
 
                     // EXECUTE TRANSFORMS (Zero-Copy Ownership Transfer)
                     for (idx, op) in self.transforms.iter().enumerate() {
@@ -491,10 +524,40 @@ where
                     // ROUTE TO MAIN SINK
                     if let Some(ctx) = current {
                         records_out += 1;
+                        sink_records_out += 1;
+                        let sink_step_start = std::time::Instant::now();
                         if let Err(e) = sink.write(ctx).await {
                             eprintln!("[Clotho] Sink write failed: {}", e);
                             telemetry::flush_telemetry_http().await;
                             return Err(e);
+                        }
+                        // Emit sink step metric (rate-limited: max 1 per second)
+                        let now_sec = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        let should_emit_sink = {
+                            let last = self.step_last_sample
+                                .entry("sink".to_string())
+                                .or_insert_with(|| AtomicU64::new(0));
+                            if last.load(Ordering::Relaxed) < now_sec {
+                                last.store(now_sec, Ordering::Relaxed);
+                                true
+                            } else {
+                                false
+                            }
+                        };
+                        if should_emit_sink {
+                            telemetry::emit_step_metrics(
+                                &pipeline_id,
+                                &stage_name,
+                                "sink",
+                                "sink",
+                                sink_records_out,
+                                sink_records_out,
+                                0, 0, 0,
+                                sink_step_start.elapsed().as_millis() as u64,
+                            );
                         }
                     }
                 }
