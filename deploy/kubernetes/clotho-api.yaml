@@ -87,6 +87,8 @@ spec:
               value: "clotho-prod"
             - name: CLOTHO_NS_PREVIEW
               value: "clotho-preview"
+            - name: CLOTHO_SDK_LATEST_VERSION
+              value: "0.0.1-alpha.1"
           resources:
             requests:
               cpu: "50m"
