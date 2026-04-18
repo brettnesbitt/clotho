@@ -172,6 +172,51 @@ impl MongoSource {
         self
     }
 
+    
+    pub async fn aggregate(&self, pipeline: serde_json::Value) -> Result<Vec<serde_json::Value>> {
+        let url = format!("{}/v1/mongo/{}/{}/aggregate", self.proxy_url(), self.db, self.coll);
+        let payload = serde_json::json!({
+            "pipeline": pipeline
+        });
+
+        let res = self.http_client.post(&url).json(&payload)?.send().await?;
+        if !res.is_success() {
+            let status = res.status();
+            let body = res.text().unwrap_or_default();
+            anyhow::bail!("Clotho Data Proxy error ({}): {}", status, body);
+        }
+
+        let body = res.text().unwrap_or_default();
+        let json_res: serde_json::Value = serde_json::from_str(&body)?;
+        
+        if !json_res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            anyhow::bail!("Proxy returned error: {}", body);
+        }
+
+        let data = json_res.get("data").cloned().unwrap_or(serde_json::Value::Array(vec![]));
+        
+        if let serde_json::Value::Array(arr) = data {
+            Ok(arr)
+        } else {
+            Ok(vec![])
+        }
+    }
+
+    pub async fn find(&self, filter: serde_json::Value, limit: Option<i64>) -> Result<Vec<serde_json::Value>> {
+        use futures_util::StreamExt;
+        let filter_doc = bson::to_document(&filter)?;
+        let mut opts = mongodb::options::FindOptions::default();
+        opts.limit = limit;
+        
+        let mut cursor = self.collection.find(filter_doc, opts).await?;
+        let mut results = Vec::new();
+        while let Some(doc) = cursor.next().await {
+            let doc = doc?;
+            results.push(serde_json::to_value(&doc)?);
+        }
+        Ok(results)
+    }
+
     pub async fn watch(mut self) -> Result<Self> {
         // You can pass self.pipeline here if you want to filter the CDC events natively!
         let stream = self.collection.watch(self.pipeline.clone(), None).await?;
@@ -235,6 +280,94 @@ impl Source<DataFrame> for MongoSource {
         match reader.finish() {
             Ok(df) => Some(Ok(Context::root(df, "mongo_batch"))),
             Err(e) => Some(Err(anyhow::anyhow!("Polars parsing error: {}", e))),
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 2.5 MONGO SOURCE (WASM - Proxy Query)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(target_family = "wasm")]
+pub struct MongoSource {
+    uri: String,
+    db: String,
+    coll: String,
+    http_client: crate::http::Client,
+}
+
+#[cfg(target_family = "wasm")]
+impl MongoSource {
+    pub async fn new(uri: &str, db: &str, coll: &str) -> Result<Self> {
+        Ok(Self {
+            uri: uri.into(),
+            db: db.into(),
+            coll: coll.into(),
+            http_client: crate::http::Client::new(),
+        })
+    }
+
+    fn proxy_url(&self) -> String {
+        crate::config::var_or("CLOTHO_PROXY_URL", "http://clotho-data-proxy.clotho-system.svc.cluster.local:9090")
+    }
+
+    
+    pub async fn aggregate(&self, pipeline: serde_json::Value) -> Result<Vec<serde_json::Value>> {
+        let url = format!("{}/v1/mongo/{}/{}/aggregate", self.proxy_url(), self.db, self.coll);
+        let payload = serde_json::json!({
+            "pipeline": pipeline
+        });
+
+        let res = self.http_client.post(&url).json(&payload)?.send().await?;
+        if !res.is_success() {
+            let status = res.status();
+            let body = res.text().unwrap_or_default();
+            anyhow::bail!("Clotho Data Proxy error ({}): {}", status, body);
+        }
+
+        let body = res.text().unwrap_or_default();
+        let json_res: serde_json::Value = serde_json::from_str(&body)?;
+        
+        if !json_res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            anyhow::bail!("Proxy returned error: {}", body);
+        }
+
+        let data = json_res.get("data").cloned().unwrap_or(serde_json::Value::Array(vec![]));
+        
+        if let serde_json::Value::Array(arr) = data {
+            Ok(arr)
+        } else {
+            Ok(vec![])
+        }
+    }
+
+    pub async fn find(&self, filter: serde_json::Value, limit: Option<i64>) -> Result<Vec<serde_json::Value>> {
+        let url = format!("{}/v1/mongo/{}/{}/find", self.proxy_url(), self.db, self.coll);
+        let payload = serde_json::json!({
+            "filter": filter,
+            "limit": limit
+        });
+
+        let res = self.http_client.post(&url).json(&payload)?.send().await?;
+        if !res.is_success() {
+            let status = res.status();
+            let body = res.text().unwrap_or_default();
+            anyhow::bail!("Clotho Data Proxy error ({}): {}", status, body);
+        }
+
+        let body = res.text().unwrap_or_default();
+        let json_res: serde_json::Value = serde_json::from_str(&body)?;
+        
+        if !json_res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            anyhow::bail!("Proxy returned error: {}", body);
+        }
+
+        let data = json_res.get("data").cloned().unwrap_or(serde_json::Value::Array(vec![]));
+        
+        if let serde_json::Value::Array(arr) = data {
+            Ok(arr)
+        } else {
+            Ok(vec![])
         }
     }
 }

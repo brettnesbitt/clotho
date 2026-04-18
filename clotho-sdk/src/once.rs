@@ -9,7 +9,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::collections::HashMap;
 
 // Matches the exact signature from stream.rs: Returns ownership of data on Err
+#[cfg(not(target_family = "wasm"))]
 type AsyncTransformFn<T> = Box<dyn Fn(Context<T>) -> Pin<Box<dyn Future<Output = Result<Context<T>, (anyhow::Error, Context<T>)>> + Send>> + Send + Sync>;
+
+#[cfg(target_family = "wasm")]
+type AsyncTransformFn<T> = Box<dyn Fn(Context<T>) -> Pin<Box<dyn Future<Output = Result<Context<T>, (anyhow::Error, Context<T>)>>>>>;
 
 /// Optimized for Webhooks / Serverless HTTP Triggers
 pub struct OncePipeline<T> {
@@ -22,7 +26,7 @@ pub struct OncePipeline<T> {
 }
 
 impl<T> OncePipeline<T> 
-where T: Send + Sync + 'static 
+where T: 'static 
 {
     pub fn new(payload: T) -> Self {
         telemetry::mark_birth();
@@ -51,7 +55,7 @@ where T: Send + Sync + 'static
 
     /// Pure logic mapping. Uses the Zero-Copy Ownership Return pattern.
     pub fn map<F>(mut self, op: F) -> Self 
-    where F: Fn(T) -> Result<T, (anyhow::Error, T)> + Send + Sync + 'static 
+    where F: Fn(T) -> Result<T, (anyhow::Error, T)> + 'static 
     {
         let idx = self.next_step_idx();
         self.transforms.push(Box::new(move |ctx: Context<T>| {
@@ -73,10 +77,28 @@ where T: Send + Sync + 'static
     }
 
     /// Async mapping for API calls (e.g., verifying a Stripe webhook signature)
+    #[cfg(not(target_family = "wasm"))]
     pub fn map_async<F, Fut>(mut self, op: F) -> Self 
     where 
         F: Fn(Context<T>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Context<T>, (anyhow::Error, Context<T>)>> + Send + 'static
+    {
+        let idx = self.next_step_idx();
+        self.transforms.push(Box::new(move |ctx| {
+            Box::pin(op(ctx))
+        }));
+        self.transform_steps.push(StepInfo {
+            name: format!("map_async_{}", idx),
+            step_type: "transform".to_string(),
+        });
+        self
+    }
+
+    #[cfg(target_family = "wasm")]
+    pub fn map_async<F, Fut>(mut self, op: F) -> Self 
+    where 
+        F: Fn(Context<T>) -> Fut + 'static,
+        Fut: Future<Output = Result<Context<T>, (anyhow::Error, Context<T>)>> + 'static
     {
         let idx = self.next_step_idx();
         self.transforms.push(Box::new(move |ctx| {
