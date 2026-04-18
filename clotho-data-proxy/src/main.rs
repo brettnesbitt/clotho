@@ -599,6 +599,14 @@ struct MongoInsertManyRequest {
     ordered: bool,
 }
 
+#[derive(Deserialize)]
+struct MongoUpdateManyExtRequest {
+    filter: serde_json::Value,
+    update: serde_json::Value,
+    #[serde(default)]
+    upsert: bool,
+}
+
 async fn mongo_insert_one(
     State(state): State<AppState>,
     Path((db, collection)): Path<(String, String)>,
@@ -715,6 +723,45 @@ async fn mongo_insert_many(
     }
 }
 
+async fn mongo_update_many(
+    State(state): State<AppState>,
+    Path((db, collection)): Path<(String, String)>,
+    Json(body): Json<MongoUpdateManyExtRequest>,
+) -> impl IntoResponse {
+    let col = state.collection_in_db(&db, &collection);
+    let filter = json_to_doc(&body.filter).unwrap_or(doc! {});
+    let update = json_to_doc(&body.update).unwrap_or(doc! {});
+
+    let opts = mongodb::options::UpdateOptions::builder()
+        .upsert(body.upsert)
+        .build();
+
+    match col.update_many(filter, update, opts).await {
+        Ok(result) => (
+            StatusCode::OK,
+            Json(DataResponse {
+                ok: true,
+                data: Some(serde_json::json!({
+                    "matched_count": result.matched_count,
+                    "modified_count": result.modified_count,
+                    "upserted_id": result.upserted_id.as_ref().map(|id| id.to_string())
+                })),
+                count: Some(result.modified_count as i64),
+                error: None,
+            }),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(DataResponse {
+                ok: false,
+                data: None,
+                count: None,
+                error: Some(e.to_string()),
+            }),
+        ),
+    }
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -771,6 +818,7 @@ async fn main() {
         // SDK-compatible routes with database parameter
         .route("/v1/mongo/:db/:collection/insert", post(mongo_insert_one))
         .route("/v1/mongo/:db/:collection/insert-many", post(mongo_insert_many))
+        .route("/v1/mongo/:db/:collection/update-many", post(mongo_update_many))
         .with_state(state);
 
     info!(addr = %addr, "Clotho Data Proxy starting");

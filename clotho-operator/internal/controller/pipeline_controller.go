@@ -666,7 +666,20 @@ func (r *PipelineReconciler) reconcileExternalBuild(ctx context.Context, pipelin
 		return ctrl.Result{}, err
 	}
 
-	// Job doesn't exist, we must trigger it
+	// Job doesn't exist (may have been deleted by TTL). Check if the build already completed
+	// by looking at the target-image annotation on the Pipeline CR.
+	targetImage = pipeline.Annotations["clotho.run/target-image"]
+	if targetImage != "" && pipeline.Spec.Image != targetImage {
+		log.Info("Tier 1.5: Build job not found but target-image annotation exists, patching spec.image", "image", targetImage)
+		pipeline.Spec.Image = targetImage
+		pipeline.Status.BuildFailures = 0
+		if updateErr := r.Status().Update(ctx, pipeline); updateErr != nil {
+			log.Error(updateErr, "Could not reset BuildFailures after successful build")
+		}
+		return ctrl.Result{}, r.Update(ctx, pipeline)
+	}
+
+	// Job doesn't exist and no target-image annotation, we must trigger it
 	// Generate unique image tag
 	tag := fmt.Sprintf("%s-%d", sanitizeImageTagPart(pipeline.Spec.Reference), time.Now().Unix())
 	registry := buildConfig.Registry

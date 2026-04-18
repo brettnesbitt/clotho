@@ -246,6 +246,14 @@ impl Source<DataFrame> for MongoSource {
 // WASM:   HTTP POST to Clotho Data Proxy (localhost DaemonSet)
 // ═══════════════════════════════════════════════════════════════════════════════
 
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct MongoUpdate {
+    pub filter: serde_json::Value,
+    pub update: serde_json::Value,
+    #[serde(default)]
+    pub upsert: bool,
+}
+
 // ── Native MongoSink ─────────────────────────────────────────────────────────
 #[cfg(not(target_family = "wasm"))]
 pub struct MongoSink {
@@ -449,6 +457,106 @@ impl Sink<DataFrame> for MongoSink {
         if !docs_to_insert.is_empty() {
             self.collection.insert_many(docs_to_insert, None).await?;
         }
+        Ok(())
+    }
+}
+
+// ── Sink<MongoUpdate> — single document update/upsert ────────────────────────
+
+#[cfg(not(target_family = "wasm"))]
+#[async_trait]
+impl Sink<MongoUpdate> for MongoSink {
+    async fn write(&mut self, ctx: Context<MongoUpdate>) -> Result<()> {
+        let filter = bson::to_document(&ctx.data.filter).unwrap_or(bson::doc! {});
+        let update = bson::to_document(&ctx.data.update).unwrap_or(bson::doc! {});
+        let opts = mongodb::options::UpdateOptions::builder()
+            .upsert(ctx.data.upsert)
+            .build();
+        self.collection.update_many(filter, update, opts).await?;
+        Ok(())
+    }
+}
+
+#[cfg(target_family = "wasm")]
+#[async_trait(?Send)]
+impl Sink<MongoUpdate> for MongoSink {
+    async fn write(&mut self, ctx: Context<MongoUpdate>) -> Result<()> {
+        let url = format!("{}/v1/mongo/{}/{}/update-many", self.proxy_url(), self.db, self.coll);
+        eprintln!("[MongoSink] POST {} (1 update)", url);
+
+        let res = match self.http_client
+            .post(&url)
+            .json(&ctx.data)?
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[MongoSink] HTTP error: {:#}", e);
+                return Err(e);
+            }
+        };
+
+        if !res.is_success() {
+            let status = res.status();
+            let body = res.text().unwrap_or_default();
+            anyhow::bail!("Clotho Data Proxy error ({}): {}", status, body);
+        }
+        Ok(())
+    }
+}
+
+// ── Sink<Vec<MongoUpdate>> — bulk update/upsert ──────────────────────────────
+
+#[cfg(not(target_family = "wasm"))]
+#[async_trait]
+impl Sink<Vec<MongoUpdate>> for MongoSink {
+    async fn write(&mut self, ctx: Context<Vec<MongoUpdate>>) -> Result<()> {
+        if ctx.data.is_empty() { return Ok(()); }
+        
+        for update_req in ctx.data {
+            let filter = bson::to_document(&update_req.filter).unwrap_or(bson::doc! {});
+            let update = bson::to_document(&update_req.update).unwrap_or(bson::doc! {});
+            let opts = mongodb::options::UpdateOptions::builder()
+                .upsert(update_req.upsert)
+                .build();
+            self.collection.update_many(filter, update, opts).await?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_family = "wasm")]
+#[async_trait(?Send)]
+impl Sink<Vec<MongoUpdate>> for MongoSink {
+    async fn write(&mut self, ctx: Context<Vec<MongoUpdate>>) -> Result<()> {
+        if ctx.data.is_empty() { return Ok(()); }
+
+        let url = format!("{}/v1/mongo/{}/{}/update-many", self.proxy_url(), self.db, self.coll);
+        eprintln!("[MongoSink] POST {} ({} updates sequentially)", url, ctx.data.len());
+
+        // Since the proxy doesn't have a bulk-update endpoint yet, we loop through them
+        for update_req in ctx.data {
+            let res = match self.http_client
+                .post(&url)
+                .json(&update_req)?
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("[MongoSink] HTTP error: {:#}", e);
+                    return Err(e);
+                }
+            };
+
+            if !res.is_success() {
+                let status = res.status();
+                let body = res.text().unwrap_or_default();
+                anyhow::bail!("Clotho Data Proxy error ({}): {}", status, body);
+            }
+        }
+        
         Ok(())
     }
 }
