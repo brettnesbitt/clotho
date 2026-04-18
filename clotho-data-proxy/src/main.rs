@@ -607,6 +607,18 @@ struct MongoUpdateManyExtRequest {
     upsert: bool,
 }
 
+#[derive(Deserialize)]
+struct MongoFindRequest {
+    #[serde(default)]
+    filter: serde_json::Value,
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    skip: Option<i64>,
+}
+
+
+
 async fn mongo_insert_one(
     State(state): State<AppState>,
     Path((db, collection)): Path<(String, String)>,
@@ -762,6 +774,105 @@ async fn mongo_update_many(
     }
 }
 
+async fn mongo_find(
+    State(state): State<AppState>,
+    Path((db, collection)): Path<(String, String)>,
+    Json(body): Json<MongoFindRequest>,
+) -> impl IntoResponse {
+    let col = state.collection_in_db(&db, &collection);
+    
+    let filter = if body.filter.is_null() {
+        doc! {}
+    } else {
+        json_to_doc(&body.filter).unwrap_or(doc! {})
+    };
+
+    let mut opts = mongodb::options::FindOptions::default();
+    if let Some(limit) = body.limit {
+        opts.limit = Some(limit);
+    }
+    opts.skip = body.skip.map(|s| s as u64);
+
+    match col.find(filter, Some(opts)).await {
+        Ok(mut cursor) => {
+            let mut json_docs = Vec::new();
+            while let Ok(Some(doc)) = cursor.try_next().await {
+                if let Ok(json_val) = doc_to_json(&doc) {
+                    json_docs.push(json_val);
+                }
+            }
+            let count = json_docs.len() as i64;
+            (
+                StatusCode::OK,
+                Json(DataResponse {
+                    ok: true,
+                    data: Some(serde_json::Value::Array(json_docs)),
+                    count: Some(count),
+                    error: None,
+                }),
+            )
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(DataResponse {
+                ok: false,
+                data: None,
+                count: None,
+                error: Some(e.to_string()),
+            }),
+        ),
+    }
+}
+
+
+#[derive(Deserialize)]
+struct MongoAggregateRequest {
+    pipeline: Vec<serde_json::Value>,
+}
+
+async fn mongo_aggregate(
+    State(state): State<AppState>,
+    Path((db, collection)): Path<(String, String)>,
+    Json(body): Json<MongoAggregateRequest>,
+) -> impl IntoResponse {
+    let col = state.collection_in_db(&db, &collection);
+    
+    let pipeline: Vec<Document> = body.pipeline
+        .iter()
+        .filter_map(|v| json_to_doc(v).ok())
+        .collect();
+
+    match col.aggregate(pipeline, None).await {
+        Ok(mut cursor) => {
+            let mut json_docs = Vec::new();
+            while let Ok(Some(doc)) = cursor.try_next().await {
+                if let Ok(json_val) = doc_to_json(&doc) {
+                    json_docs.push(json_val);
+                }
+            }
+            let count = json_docs.len() as i64;
+            (
+                StatusCode::OK,
+                Json(DataResponse {
+                    ok: true,
+                    data: Some(serde_json::Value::Array(json_docs)),
+                    count: Some(count),
+                    error: None,
+                }),
+            )
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(DataResponse {
+                ok: false,
+                data: None,
+                count: None,
+                error: Some(e.to_string()),
+            }),
+        ),
+    }
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -819,6 +930,8 @@ async fn main() {
         .route("/v1/mongo/:db/:collection/insert", post(mongo_insert_one))
         .route("/v1/mongo/:db/:collection/insert-many", post(mongo_insert_many))
         .route("/v1/mongo/:db/:collection/update-many", post(mongo_update_many))
+        .route("/v1/mongo/:db/:collection/find", post(mongo_find))
+        .route("/v1/mongo/:db/:collection/aggregate", post(mongo_aggregate))
         .with_state(state);
 
     info!(addr = %addr, "Clotho Data Proxy starting");
