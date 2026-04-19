@@ -595,14 +595,13 @@ func (r *PipelineReconciler) reconcileExternalBuild(ctx context.Context, pipelin
 			if targetImage == "" {
 				targetImage = pipeline.Annotations["clotho.run/target-image"]
 			}
+			if pipeline.Annotations == nil {
+				pipeline.Annotations = make(map[string]string)
+			}
+			pipeline.Annotations["clotho.run/build-status"] = "succeeded"
 			if pipeline.Spec.Image != targetImage {
 				log.Info("Tier 1.5: External build completed", "image", targetImage)
 				pipeline.Spec.Image = targetImage
-				// Reset failure counter on success
-				pipeline.Status.BuildFailures = 0
-				if updateErr := r.Status().Update(ctx, pipeline); updateErr != nil {
-					log.Error(updateErr, "Could not reset BuildFailures after successful build")
-				}
 				return ctrl.Result{}, r.Update(ctx, pipeline)
 			}
 			log.Info("Tier 1.5: External build already completed")
@@ -668,15 +667,18 @@ func (r *PipelineReconciler) reconcileExternalBuild(ctx context.Context, pipelin
 
 	// Job doesn't exist (may have been deleted by TTL). Check if the build already completed
 	// by looking at the target-image annotation on the Pipeline CR.
-	targetImage = pipeline.Annotations["clotho.run/target-image"]
+	targetImage := pipeline.Annotations["clotho.run/target-image"]
+	buildStatus := pipeline.Annotations["clotho.run/build-status"]
 	if targetImage != "" && pipeline.Spec.Image != targetImage {
-		log.Info("Tier 1.5: Build job not found but target-image annotation exists, patching spec.image", "image", targetImage)
-		pipeline.Spec.Image = targetImage
-		pipeline.Status.BuildFailures = 0
-		if updateErr := r.Status().Update(ctx, pipeline); updateErr != nil {
-			log.Error(updateErr, "Could not reset BuildFailures after successful build")
+		if buildStatus == "succeeded" {
+			log.Info("Tier 1.5: Build job not found but target-image annotation exists, patching spec.image", "image", targetImage)
+			pipeline.Spec.Image = targetImage
+			return ctrl.Result{}, r.Update(ctx, pipeline)
+		} else {
+			log.Info("Tier 1.5: Build job not found and did not succeed, clearing target-image annotation to re-trigger")
+			delete(pipeline.Annotations, "clotho.run/target-image")
+			return ctrl.Result{}, r.Update(ctx, pipeline)
 		}
-		return ctrl.Result{}, r.Update(ctx, pipeline)
 	}
 
 	// Job doesn't exist and no target-image annotation, we must trigger it
@@ -686,7 +688,7 @@ func (r *PipelineReconciler) reconcileExternalBuild(ctx context.Context, pipelin
 	if registry == "" {
 		registry = "gcr.io"
 	}
-	targetImage := fmt.Sprintf("%s/%s:%s", registry, pipeline.Name, tag)
+	targetImage = fmt.Sprintf("%s/%s:%s", registry, pipeline.Name, tag)
 
 	switch buildConfig.Builder {
 	case "cloudbuild":
@@ -768,6 +770,7 @@ func (r *PipelineReconciler) triggerCloudBuild(ctx context.Context, pipeline *cl
 							fi
 							gcloud builds submit . \
 								--config=cloudbuild.yaml \
+								--polling-interval=30 \
 								--substitutions=_TARGET_IMAGE=%s
 						`, pipeline.Spec.GitRepository, pipeline.Spec.Reference, pipeline.Spec.Path, targetImage)},
 						Env: []corev1.EnvVar{{
