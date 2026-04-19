@@ -26,7 +26,7 @@ pub struct OncePipeline<T> {
 }
 
 impl<T> OncePipeline<T> 
-where T: 'static 
+where T: Send + 'static 
 {
     pub fn new(payload: T) -> Self {
         telemetry::mark_birth();
@@ -55,7 +55,7 @@ where T: 'static
 
     /// Pure logic mapping. Uses the Zero-Copy Ownership Return pattern.
     pub fn map<F>(mut self, op: F) -> Self 
-    where F: Fn(T) -> Result<T, (anyhow::Error, T)> + 'static 
+    where F: Fn(T) -> Result<T, (anyhow::Error, T)> + Send + Sync + 'static 
     {
         let idx = self.next_step_idx();
         self.transforms.push(Box::new(move |ctx: Context<T>| {
