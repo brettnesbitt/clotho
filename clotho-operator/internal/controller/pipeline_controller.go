@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/robfig/cron/v3"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -675,6 +676,12 @@ func (r *PipelineReconciler) reconcileExternalBuild(ctx context.Context, pipelin
 			pipeline.Spec.Image = targetImage
 			return ctrl.Result{}, r.Update(ctx, pipeline)
 		} else {
+			// Job expired via TTL without succeeding. Only re-trigger if we haven't
+			// already exhausted retries — otherwise we'd loop forever after TTL cleanup.
+			if pipeline.Status.Phase == "BuildFailed" {
+				log.Info("Tier 1.5: Build job TTL-expired but already BuildFailed; not re-triggering")
+				return ctrl.Result{}, nil
+			}
 			log.Info("Tier 1.5: Build job not found and did not succeed, clearing target-image annotation to re-trigger")
 			delete(pipeline.Annotations, "clotho.run/target-image")
 			return ctrl.Result{}, r.Update(ctx, pipeline)
@@ -963,8 +970,7 @@ func (r *PipelineReconciler) reconcileSchedule(ctx context.Context, pipeline *cl
 	case "interval":
 		return r.reconcileIntervalSchedule(ctx, pipeline)
 	case "cron":
-		log.Info("Cron scheduling not yet implemented, treating as trigger mode", "pipeline", pipeline.Name)
-		return ctrl.Result{}, nil
+		return r.reconcileCronSchedule(ctx, pipeline)
 	default:
 		log.Info("Unknown schedule mode, ignoring", "mode", pipeline.Spec.Schedule.Mode)
 		return ctrl.Result{}, nil
@@ -1032,6 +1038,66 @@ func (r *PipelineReconciler) reconcileIntervalSchedule(ctx context.Context, pipe
 // reconcileDAGPipeline handles DAG-based pipelines with multiple stages.
 // Each stage becomes a separate Deployment/SpinApp, and the operator manages
 // the inter-stage communication via the message bus.
+func (r *PipelineReconciler) reconcileCronSchedule(ctx context.Context, pipeline *clothov1alpha1.Pipeline) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+
+	cronParser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+	schedule, err := cronParser.Parse(pipeline.Spec.Schedule.Cron)
+	if err != nil {
+		log.Error(err, "Failed to parse cron expression", "cron", pipeline.Spec.Schedule.Cron)
+		return ctrl.Result{}, nil
+	}
+
+	now := time.Now()
+	var lastRun time.Time
+	if pipeline.Status.LastInvocation != nil {
+		lastRun = pipeline.Status.LastInvocation.Time
+	} else {
+		lastRun = pipeline.CreationTimestamp.Time
+	}
+
+	nextRun := schedule.Next(lastRun)
+
+	if now.Before(nextRun) {
+		remaining := nextRun.Sub(now)
+		log.Info("Waiting for next cron invocation", "pipeline", pipeline.Name, "remaining", remaining.String(), "nextRun", nextRun.String())
+		return ctrl.Result{RequeueAfter: remaining}, nil
+	}
+
+	// Time to invoke the pipeline
+	log.Info("Invoking pipeline on cron schedule", "pipeline", pipeline.Name)
+
+	pipeline.Status.Phase = "Running"
+	if err := r.Status().Update(ctx, pipeline); err != nil {
+		log.Error(err, "Failed to set Running phase")
+		return ctrl.Result{}, err
+	}
+
+	invokeErr := r.invokePipeline(ctx, pipeline)
+
+	// Refetch before updating status again to avoid conflict
+	if err := r.Get(ctx, types.NamespacedName{Name: pipeline.Name, Namespace: pipeline.Namespace}, pipeline); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	pipeline.Status.Phase = "Enabled"
+	nowMeta := metav1.NewTime(now)
+	pipeline.Status.LastInvocation = &nowMeta
+	if err := r.Status().Update(ctx, pipeline); err != nil {
+		log.Error(err, "Failed to update status after invocation")
+		return ctrl.Result{}, err
+	}
+
+	if invokeErr != nil {
+		log.Error(invokeErr, "Failed to invoke pipeline", "pipeline", pipeline.Name)
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
+	nextNextRun := schedule.Next(now)
+	log.Info("Pipeline invoked successfully via cron", "pipeline", pipeline.Name, "nextRun", nextNextRun.String())
+	return ctrl.Result{RequeueAfter: nextNextRun.Sub(now)}, nil
+}
+
 func (r *PipelineReconciler) reconcileDAGPipeline(ctx context.Context, pipeline *clothov1alpha1.Pipeline) error {
 	log := log.FromContext(ctx)
 
