@@ -172,36 +172,6 @@ impl MongoSource {
         self
     }
 
-    
-    pub async fn aggregate(&self, pipeline: serde_json::Value) -> Result<Vec<serde_json::Value>> {
-        let url = format!("{}/v1/mongo/{}/{}/aggregate", self.proxy_url(), self.db, self.coll);
-        let payload = serde_json::json!({
-            "pipeline": pipeline
-        });
-
-        let res = self.http_client.post(&url).json(&payload)?.send().await?;
-        if !res.is_success() {
-            let status = res.status();
-            let body = res.text().unwrap_or_default();
-            anyhow::bail!("Clotho Data Proxy error ({}): {}", status, body);
-        }
-
-        let body = res.text().unwrap_or_default();
-        let json_res: serde_json::Value = serde_json::from_str(&body)?;
-        
-        if !json_res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
-            anyhow::bail!("Proxy returned error: {}", body);
-        }
-
-        let data = json_res.get("data").cloned().unwrap_or(serde_json::Value::Array(vec![]));
-        
-        if let serde_json::Value::Array(arr) = data {
-            Ok(arr)
-        } else {
-            Ok(vec![])
-        }
-    }
-
     pub async fn find(&self, filter: serde_json::Value, limit: Option<i64>) -> Result<Vec<serde_json::Value>> {
         use futures_util::StreamExt;
         let filter_doc = bson::to_document(&filter)?;
