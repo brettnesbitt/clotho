@@ -276,7 +276,7 @@ gcloud container node-pools create wasm-pool \
 kubectl apply -f config/registry/registry.yaml
 
 # Deploy operator
-export IMG=us-central1-docker.pkg.dev/quotopia-391900/clotho/clotho-operator:latest
+export IMG=ghcr.io/clotho-framework/clotho-operator:latest
 make deploy IMG=$IMG
 ```
 
@@ -289,7 +289,7 @@ kind: Pipeline
 metadata:
   name: counter-example
 spec:
-  gitRepository: https://github.com/brettimus/clotho.git
+  gitRepository: https://github.com/brettnesbitt/clotho.git
   reference: main
   path: clotho-sdk/examples/counter
   replicas: 2

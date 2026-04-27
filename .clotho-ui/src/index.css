@@ -1,0 +1,289 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Dashboard animations */
+@keyframes pulse-glow {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+.animate-pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   IDE Page — scoped under .ide-container
+   All styles below only apply inside the IDE editor page.
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+.ide-container {
+  --ide-bg: #1e1e1e;
+  --ide-bg2: #252526;
+  --ide-bg3: #2d2d2d;
+  --ide-hover: #2a2d2e;
+  --ide-active: #37373d;
+  --ide-input: #3c3c3c;
+  --ide-border: #3e3e42;
+  --ide-border-lt: #474747;
+  --ide-text: #cccccc;
+  --ide-text2: #858585;
+  --ide-text3: #5a5a5a;
+  --ide-bright: #e8e8e8;
+  --ide-blue: #007acc;
+  --ide-green: #4ec9b0;
+  --ide-orange: #ce9178;
+  --ide-red: #f44747;
+  --ide-brand: #10b981;
+  --ide-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono', Consolas, monospace;
+
+  display: grid;
+  grid-template-rows: 40px 1fr 200px;
+  height: calc(100vh - 48px); /* subtract TopBar height */
+  width: 100%;
+  background: var(--ide-bg);
+  color: var(--ide-text);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+/* ── IDE Header ────────────────────────────────────────────────────────────── */
+
+.ide-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  background: var(--ide-bg2);
+  border-bottom: 1px solid var(--ide-border);
+}
+
+.ide-pipeline-name {
+  font-family: var(--ide-mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ide-bright);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ide-repo-badge {
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--ide-text2);
+  background: var(--ide-bg3);
+  border: 1px solid var(--ide-border);
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+
+/* ── IDE Main (file tree + editor) ─────────────────────────────────────────── */
+
+.ide-main {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  overflow: hidden;
+}
+
+.ide-sidebar {
+  background: var(--ide-bg2);
+  border-right: 1px solid var(--ide-border);
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.ide-editor {
+  overflow: hidden;
+  background: var(--ide-bg);
+}
+
+/* ── IDE Terminal ──────────────────────────────────────────────────────────── */
+
+.ide-terminal {
+  border-top: 1px solid var(--ide-border);
+  background: var(--ide-bg2);
+  overflow: hidden;
+}
+
+/* ── File Tree ─────────────────────────────────────────────────────────────── */
+
+.ide-container .file-tree { height: 100%; display: flex; flex-direction: column; }
+
+.ide-container .file-tree-header {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 12px; font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--ide-text2); border-bottom: 1px solid var(--ide-border); flex-shrink: 0;
+}
+.ide-container .file-tree-header svg { color: var(--ide-text3); }
+.ide-container .file-tree-list { overflow-y: auto; flex: 1; }
+
+.ide-container .tree-node {
+  display: flex; align-items: center; gap: 4px;
+  padding: 3px 8px; cursor: pointer; white-space: nowrap;
+  font-size: 13px; user-select: none;
+}
+.ide-container .tree-node:hover { background: var(--ide-hover); }
+.ide-container .tree-node.selected { background: var(--ide-active); color: var(--ide-bright); }
+.ide-container .tree-node.directory { color: var(--ide-text); }
+.ide-container .tree-node.file { color: var(--ide-text2); }
+.ide-container .tree-node.file.selected { color: var(--ide-bright); }
+
+.ide-container .tree-icon { font-size: 12px; width: 16px; text-align: center; flex-shrink: 0; }
+.ide-container .tree-name { overflow: hidden; text-overflow: ellipsis; }
+.ide-container .tree-size {
+  margin-left: auto; font-size: 10px;
+  font-family: var(--ide-mono); color: var(--ide-text3); flex-shrink: 0;
+}
+
+/* ── Terminal ──────────────────────────────────────────────────────────────── */
+
+.ide-container .terminal { height: 100%; display: flex; flex-direction: column; }
+
+.ide-container .terminal-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 8px; height: 32px; background: var(--ide-bg3);
+  border-bottom: 1px solid var(--ide-border); flex-shrink: 0;
+}
+.ide-container .terminal-tabs { display: flex; }
+.ide-container .terminal-tab {
+  padding: 4px 12px; font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.05em; color: var(--ide-text2); cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+.ide-container .terminal-tab:hover { color: var(--ide-text); }
+.ide-container .terminal-tab.active { color: var(--ide-bright); border-bottom-color: var(--ide-blue); }
+
+.ide-container .terminal-btn {
+  background: none; border: none; color: var(--ide-text2);
+  cursor: pointer; padding: 4px; border-radius: 3px; display: flex; align-items: center;
+}
+.ide-container .terminal-btn:hover { background: var(--ide-hover); color: var(--ide-text); }
+
+.ide-container .terminal-output {
+  flex: 1; overflow-y: auto; padding: 8px 12px;
+  font-family: var(--ide-mono); font-size: 12px; line-height: 1.6;
+}
+.ide-container .terminal-empty { color: var(--ide-text3); }
+.ide-container .terminal-prompt { color: var(--ide-green); }
+
+.ide-container .terminal-line pre {
+  font-family: inherit; font-size: inherit;
+  white-space: pre-wrap; word-break: break-all; margin: 0;
+}
+.ide-container .terminal-line.level-error pre { color: var(--ide-red); }
+.ide-container .terminal-line.level-warn pre { color: var(--ide-orange); }
+.ide-container .terminal-line.level-success pre { color: var(--ide-brand); }
+.ide-container .terminal-line.level-info pre { color: var(--ide-blue); }
+
+/* ── Action Bar ────────────────────────────────────────────────────────────── */
+
+.ide-container .action-bar { display: flex; align-items: center; gap: 12px; }
+
+.ide-container .mode-badge {
+  display: flex; align-items: center; gap: 6px;
+  padding: 2px 10px; border-radius: 10px;
+  background: var(--ide-bg3); border: 1px solid var(--ide-border);
+  font-size: 11px; font-weight: 500;
+}
+.ide-container .mode-dot { width: 6px; height: 6px; border-radius: 50%; }
+.ide-container .mode-dot.readonly { background: var(--ide-text3); }
+.ide-container .mode-dot.draft { background: var(--ide-orange); box-shadow: 0 0 4px var(--ide-orange); }
+.ide-container .mode-label { font-family: var(--ide-mono); font-size: 11px; color: var(--ide-text2); }
+
+.ide-container .action-buttons { display: flex; gap: 6px; }
+
+.ide-container .action-btn {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 12px; border: 1px solid var(--ide-border); border-radius: 4px;
+  background: var(--ide-bg3); color: var(--ide-text); font-size: 12px;
+  cursor: pointer; transition: all 0.15s ease; white-space: nowrap;
+}
+.ide-container .action-btn:hover { background: var(--ide-hover); border-color: var(--ide-border-lt); }
+.ide-container .action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.ide-container .action-btn.edit { border-color: var(--ide-blue); color: var(--ide-blue); }
+.ide-container .action-btn.edit:hover { background: rgba(0, 122, 204, 0.1); }
+.ide-container .action-btn.save kbd {
+  font-family: var(--ide-mono); font-size: 10px; padding: 1px 4px;
+  background: var(--ide-input); border-radius: 3px; color: var(--ide-text3);
+}
+.ide-container .action-btn.test { border-color: var(--ide-green); color: var(--ide-green); }
+.ide-container .action-btn.test:hover { background: rgba(78, 201, 176, 0.1); }
+.ide-container .action-btn.publish { background: var(--ide-brand); border-color: var(--ide-brand); color: #fff; font-weight: 600; }
+.ide-container .action-btn.publish:hover { background: #0ea472; }
+.ide-container .action-btn.publish:disabled { background: var(--ide-bg3); border-color: var(--ide-border); color: var(--ide-text3); }
+
+/* ── GitHub Connect (inside IDE page) ──────────────────────────────────────── */
+
+.github-connect {
+  display: flex; align-items: center; justify-content: center;
+}
+.connect-card {
+  width: 400px; padding: 40px; background: #252526;
+  border: 1px solid #3e3e42; border-radius: 8px; text-align: center;
+}
+.connect-icon { color: #cccccc; margin-bottom: 20px; }
+.connect-card h2 { font-size: 20px; font-weight: 600; color: #e8e8e8; margin-bottom: 8px; }
+.connect-subtitle { font-size: 13px; color: #858585; margin-bottom: 24px; line-height: 1.5; }
+.connect-error {
+  background: rgba(244, 71, 71, 0.1); border: 1px solid rgba(244, 71, 71, 0.3);
+  color: #f44747; padding: 8px 12px; border-radius: 4px; font-size: 12px; margin-bottom: 16px;
+}
+.connect-actions { display: flex; flex-direction: column; gap: 10px; }
+
+.btn-primary {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  width: 100%; padding: 10px 16px; background: #007acc; color: #fff;
+  border: none; border-radius: 6px; font-size: 14px; font-weight: 500;
+  cursor: pointer; transition: background 0.15s;
+}
+.btn-primary:hover { background: #0587de; }
+
+.btn-secondary {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  width: 100%; padding: 10px 16px; background: transparent; color: #cccccc;
+  border: 1px solid #3e3e42; border-radius: 6px; font-size: 14px;
+  cursor: pointer; transition: all 0.15s;
+}
+.btn-secondary:hover { background: #2a2d2e; border-color: #474747; }
+
+.btn-ghost {
+  background: none; border: none; color: #858585;
+  padding: 8px 16px; font-size: 13px; cursor: pointer; border-radius: 4px;
+}
+.btn-ghost:hover { color: #cccccc; background: #2a2d2e; }
+
+.token-form { text-align: left; }
+.token-form label { display: block; font-size: 12px; font-weight: 600; color: #cccccc; margin-bottom: 4px; }
+.token-hint { font-size: 11px; color: #858585; margin-bottom: 10px; line-height: 1.5; }
+.token-form input {
+  width: 100%; padding: 8px 12px; background: #3c3c3c;
+  border: 1px solid #3e3e42; border-radius: 4px; color: #cccccc;
+  font-family: 'JetBrains Mono', monospace; font-size: 13px; outline: none;
+}
+.token-form input:focus { border-color: #007acc; }
+.token-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+
+.connect-loading {
+  display: flex; align-items: center; justify-content: center;
+  gap: 12px; padding: 20px; color: #858585;
+}
+
+/* ── Spinners ──────────────────────────────────────────────────────────────── */
+
+.spinner {
+  width: 24px; height: 24px; border: 2px solid #3e3e42;
+  border-top-color: #007acc; border-radius: 50%; animation: ide-spin 0.6s linear infinite;
+}
+.spinner-small {
+  width: 14px; height: 14px; border: 2px solid #3e3e42;
+  border-top-color: currentColor; border-radius: 50%; animation: ide-spin 0.6s linear infinite;
+}
+@keyframes ide-spin { to { transform: rotate(360deg); } }
+
+/* ── IDE Scrollbar ─────────────────────────────────────────────────────────── */
+
+.ide-container ::-webkit-scrollbar { width: 8px; height: 8px; }
+.ide-container ::-webkit-scrollbar-track { background: transparent; }
+.ide-container ::-webkit-scrollbar-thumb { background: #37373d; border-radius: 4px; }
+.ide-container ::-webkit-scrollbar-thumb:hover { background: #474747; }

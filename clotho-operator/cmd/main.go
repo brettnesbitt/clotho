@@ -177,6 +177,7 @@ func main() {
 		Client:          mgr.GetClient(),
 		Scheme:          mgr.GetScheme(),
 		ControlPlaneURL: controlPlaneURL,
+		Recorder:        mgr.GetEventRecorderFor("clotho-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "Pipeline")
 		os.Exit(1)

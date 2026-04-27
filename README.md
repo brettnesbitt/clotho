@@ -321,4 +321,15 @@ registry, deploy it as a SpinApp, and invoke it on your configured schedule.
 
 ## License
 
-MIT
+Functional Source License, Version 1.1 (FSL-1.1)
+
+Copyright (c) 2026 Brett Nesbitt
+
+The FSL is a source-available license that automatically converts to Apache 2.0 after 2 years.
+See [LICENSE](LICENSE) for full terms.
+
+---
+
+## Powered By
+
+Clotho powers the [Stockseer.ai](https://stockseer.ai) financial intelligence platform. It serves all of the backend operations for moving and transforming data.

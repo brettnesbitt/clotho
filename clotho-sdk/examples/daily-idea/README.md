@@ -1,12 +1,12 @@
 # Daily Idea Pipeline
 
-Fetches the latest daily trading idea from Stockseer API and outputs it to stdout.
+Example pipeline that demonstrates fetching data from an external API and processing it.
 
 ## What It Does
 
-1. Makes HTTP request to `https://stockseer.ai/api/idea-of-the-day`
+1. Makes HTTP request to an external API endpoint
 2. Parses the JSON response
-3. Formats and outputs the idea details (symbol, entry, stop, target, rationale)
+3. Formats and outputs the processed data
 
 ## Deploy to Clotho
 
@@ -17,7 +17,7 @@ kind: Pipeline
 metadata:
   name: daily-idea
 spec:
-  gitRepository: https://github.com/brettimus/clotho.git
+  gitRepository: https://github.com/brettnesbitt/clotho.git
   reference: main
   path: clotho-sdk/examples/daily-idea
   replicas: 1
