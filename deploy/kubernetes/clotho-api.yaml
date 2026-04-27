@@ -78,7 +78,7 @@ spec:
       serviceAccountName: clotho-api
       containers:
         - name: api
-          image: us-central1-docker.pkg.dev/quotopia-391900/clotho/clotho-api:latest
+          image: ghcr.io/clotho-framework/clotho-api:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 3000

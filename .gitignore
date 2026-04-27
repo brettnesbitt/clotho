@@ -1,8 +1,8 @@
-.clotho-**
-.local
-
+.local 
 
 # Rust
 target
 bin
 build
+dist
+node_modules

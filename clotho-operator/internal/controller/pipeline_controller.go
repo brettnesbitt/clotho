@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 )
 
@@ -40,6 +41,7 @@ type PipelineReconciler struct {
 	client.Client
 	Scheme          *runtime.Scheme
 	ControlPlaneURL string // e.g. "http://clotho-api.clotho-system.svc.cluster.local:3000"
+	Recorder        record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=core.clotho.run,resources=pipelines,verbs=get;list;watch;create;update;patch;delete
@@ -49,6 +51,7 @@ type PipelineReconciler struct {
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 func (r *PipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
@@ -606,6 +609,10 @@ func (r *PipelineReconciler) reconcileExternalBuild(ctx context.Context, pipelin
 				return ctrl.Result{}, r.Update(ctx, pipeline)
 			}
 			log.Info("Tier 1.5: External build already completed")
+			// Clean up completed job to allow next build to proceed
+			if deleteErr := r.Delete(ctx, existingJob, client.PropagationPolicy(metav1.DeletePropagationBackground)); deleteErr != nil && !errors.IsNotFound(deleteErr) {
+				log.Error(deleteErr, "Could not delete completed build job")
+			}
 			return ctrl.Result{}, nil
 		}
 		if existingJob.Status.Failed > 0 {
@@ -622,6 +629,11 @@ func (r *PipelineReconciler) reconcileExternalBuild(ctx context.Context, pipelin
 			failures := pipeline.Status.BuildFailures + 1
 			pipeline.Status.BuildFailures = failures
 
+			// Persist failures BEFORE deleting job, so TTL race doesn't lose the counter
+			if updateErr := r.Status().Update(ctx, pipeline); updateErr != nil {
+				log.Error(updateErr, "Could not increment BuildFailures")
+			}
+
 			if failures > maxRetries {
 				log.Info("Tier 1.5: Build exceeded max retries, marking BuildFailed",
 					"failures", failures, "maxRetries", maxRetries)
@@ -630,6 +642,8 @@ func (r *PipelineReconciler) reconcileExternalBuild(ctx context.Context, pipelin
 				if updateErr := r.Status().Update(ctx, pipeline); updateErr != nil {
 					log.Error(updateErr, "Could not update status to BuildFailed")
 				}
+				r.Recorder.Eventf(pipeline, corev1.EventTypeWarning, "BuildFailed",
+					"Build failed after %d attempts (max %d). Manual intervention required.", failures, maxRetries)
 				return ctrl.Result{}, nil
 			}
 
@@ -650,12 +664,10 @@ func (r *PipelineReconciler) reconcileExternalBuild(ctx context.Context, pipelin
 				delay = maxDelay
 			}
 
-			if updateErr := r.Status().Update(ctx, pipeline); updateErr != nil {
-				log.Error(updateErr, "Could not increment BuildFailures")
-			}
-
 			log.Info("Tier 1.5: Build failed, will retry with backoff",
 				"attempt", failures, "maxRetries", maxRetries, "backoff", delay)
+			r.Recorder.Eventf(pipeline, corev1.EventTypeWarning, "BuildRetry",
+				"Build attempt %d/%d failed, retrying in %v", failures, maxRetries, delay)
 			return ctrl.Result{RequeueAfter: delay}, nil
 		}
 		log.Info("Tier 1.5: External build still running, requeueing...")
@@ -678,8 +690,16 @@ func (r *PipelineReconciler) reconcileExternalBuild(ctx context.Context, pipelin
 		} else {
 			// Job expired via TTL without succeeding. Only re-trigger if we haven't
 			// already exhausted retries — otherwise we'd loop forever after TTL cleanup.
-			if pipeline.Status.Phase == "BuildFailed" {
-				log.Info("Tier 1.5: Build job TTL-expired but already BuildFailed; not re-triggering")
+			maxRetries := buildConfig.MaxBuildRetries
+			if maxRetries == 0 {
+				maxRetries = 3
+			}
+			if pipeline.Status.Phase == "BuildFailed" || pipeline.Status.BuildFailures >= maxRetries {
+				log.Info("Tier 1.5: Build job TTL-expired but retries exhausted; not re-triggering",
+					"failures", pipeline.Status.BuildFailures, "maxRetries", maxRetries)
+				r.Recorder.Eventf(pipeline, corev1.EventTypeWarning, "BuildFailed",
+					"Build failed after %d attempts (max %d). Manual intervention required.",
+					pipeline.Status.BuildFailures, maxRetries)
 				return ctrl.Result{}, nil
 			}
 			log.Info("Tier 1.5: Build job not found and did not succeed, clearing target-image annotation to re-trigger")

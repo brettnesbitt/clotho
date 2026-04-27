@@ -8,7 +8,7 @@ async fn main() -> Result<()> {
     println!("   Simulating daily idea fetch");
     println!();
 
-    // Mock daily ideas (in production, this would fetch from Stockseer API)
+    // Mock daily ideas (in production, this would fetch from an external API)
     let ideas: Vec<String> = vec![
         "AAPL: Entry $175.50, Stop $170.00, Target $185.00 - Strong momentum after earnings".into(),
         "NVDA: Entry $880.00, Stop $850.00, Target $920.00 - AI demand continues".into(),

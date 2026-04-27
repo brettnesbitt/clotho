@@ -12,7 +12,7 @@ namespace: clotho-system
 controlPlaneUrl: "https://api.clotho.io"
 
 # -- Container Registry
-registry: us-central1-docker.pkg.dev/quotopia-391900/clotho
+registry: ghcr.io/clotho-framework
 
 # -- Clotho Agent (DaemonSet - stateless telemetry broker)
 agent:

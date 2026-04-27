@@ -3,13 +3,13 @@
 This document serves as a baseline set of instructions and patterns for working with the **Clotho** framework.
 
 > [!NOTE]
-> Clotho is a Kubernetes data integration platform. Its UI and API components are proprietary Intellectual Property (IP), while the remainder of the framework (operator, SDK, plugins, etc.) is designed as open source.
+> Clotho is a Kubernetes data integration platform. All components (SDK, operator, agent, API, and UI) are open source under the Functional Source License (FSL). The FSL provides a 2-year change date after which the software automatically converts to Apache 2.0.
 
 ## 1. Project Topology (Folder Breakdown)
 The repository is split into distinct components representing the Control Plane, Data Plane, and SDK:
 
-- **`.clotho-api`**: The proprietary Control Plane API backend. It handles system state, stores configuration, and serves the dashboard UI.
-- **`.clotho-ui`**: The proprietary web dashboard frontend for observing telemetry, monitoring pipelines, and executing triggered runs.
+- **`.clotho-api`**: The Control Plane API backend. It handles system state, stores configuration, and serves the dashboard UI.
+- **`.clotho-ui`**: The web dashboard frontend for observing telemetry, monitoring pipelines, and executing triggered runs.
 - **`clotho-sdk`**: The open source Rust framework providing the core engine, traits (`Source`, `Sink`), and pipeline builders that developers use to write business logic.
 - **`clotho-macros`**: A procedural macros crate containing `#[clotho::main]` to auto-generate the Spin HTTP component entrypoint and error boundaries.
 - **`clotho-operator`**: The Kubernetes operator that reconciles `Pipeline` CRDs. It schedules, builds (WASM logic), and deploys (SpinKube or Native containers).

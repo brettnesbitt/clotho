@@ -37,7 +37,7 @@ helm install clotho-system ./deploy/helm/clotho-system \
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `namespace` | Namespace for control plane components | `clotho-system` |
-| `registry` | Container registry URL | `us-central1-docker.pkg.dev/quotopia-391900/clotho` |
+| `registry` | Container registry URL | `ghcr.io/clotho-framework` |
 | `mongo.uri` | MongoDB connection string | `""` |
 | `mongo.existingSecret` | Reference existing Secret name | `""` |
 | `mongo.database` | Database name | `clotho` |

@@ -21,7 +21,7 @@ spec:
       serviceAccountName: clotho-agent
       containers:
       - name: clotho-agent
-        image: us-central1-docker.pkg.dev/quotopia-391900/clotho/clotho-agent:latest
+        image: ghcr.io/clotho-framework/clotho-agent:latest
         imagePullPolicy: Always
         ports:
         - containerPort: 8125
