@@ -3,3 +3,4 @@
 
 pub mod mongo;
 pub mod wss;
+pub mod parquet;
