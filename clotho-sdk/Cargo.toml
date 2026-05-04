@@ -33,7 +33,7 @@ polars = { version = "0.44", features = ["lazy", "json"], optional = true }
 tokio = { version = "1.0", features = ["sync", "macros", "io-util", "rt", "rt-multi-thread", "time", "net", "signal"], optional = true }
 tokio-tungstenite = { version = "0.21", features = ["native-tls"], optional = true }
 arrow = "53.0"
-parquet = { version = "53.0", features = ["arrow", "json"] }
+parquet = { version = "53.0", default-features = false, features = ["arrow", "json", "snap"] }
 
 # MongoDB native driver — only for non-WASM targets (pulls in tokio networking)
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
