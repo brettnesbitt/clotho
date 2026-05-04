@@ -33,7 +33,7 @@ impl ParquetSink {
     /// Fetch an OAuth2 token from the GCP Metadata Server (Workload Identity).
     async fn get_gcs_token(&self) -> Result<String> {
         // If we are testing locally without metadata server, allow an override
-        if let Some(token) = crate::config::var_or_none("GCS_OAUTH_TOKEN") {
+        if let Some(token) = crate::config::var("GCS_OAUTH_TOKEN").ok() {
             return Ok(token);
         }
 
@@ -72,10 +72,10 @@ impl ParquetSink {
 
         let res = self.http_client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", token))
+            .header("Authorization", &format!("Bearer {}", token))
             .header("Content-Type", "application/octet-stream")
             // Send the raw parquet bytes
-            .body(payload)?
+            .body(payload)
             .send()
             .await
             .context("Failed to send Parquet payload to GCS")?;
