@@ -429,8 +429,18 @@ func (r *PipelineReconciler) reconcileBuild(ctx context.Context, pipeline *cloth
 	// fresh build. This branch is opt-in via spec.build.pollInterval
 	// — pipelines without polling fall through to the existing Tier-1
 	// fallthrough behavior unchanged.
+	//
+	// Important: only short-circuit when checkGitDrift actually needs us to
+	// stop (error, or drift detected → res.Requeue=true clears spec.image
+	// and forces a rebuild). On the no-drift path it returns
+	// {RequeueAfter: pollInterval} purely as a "come back later to poll"
+	// hint — but if we return that here, we never fall through to the
+	// schedule-invocation path below, and the pipeline silently stops
+	// firing on its interval. The schedule path will set its own
+	// (typically shorter) requeue, which is enough to drive the next
+	// poll on time.
 	if pipeline.Spec.Build != nil && pipeline.Spec.Build.PollInterval != "" {
-		if res, err := r.checkGitDrift(ctx, pipeline); err != nil || res.Requeue || res.RequeueAfter > 0 {
+		if res, err := r.checkGitDrift(ctx, pipeline); err != nil || res.Requeue {
 			return res, err
 		}
 	}
