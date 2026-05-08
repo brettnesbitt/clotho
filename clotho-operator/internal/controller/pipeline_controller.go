@@ -906,13 +906,20 @@ func (r *PipelineReconciler) resolveGitRefSHA(ctx context.Context, pipeline *clo
 	httpReq.Header.Set("Accept", "application/vnd.github+json")
 	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
-	// Optional token auth
-	if secretName := pipeline.Spec.GitCredentialsSecret; secretName != "" {
-		var secret corev1.Secret
-		if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: pipeline.Namespace}, &secret); err == nil {
-			if tok, ok := secret.Data["token"]; ok && len(tok) > 0 {
-				httpReq.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(tok)))
-			}
+	// Token auth — match the convention used by buildEnvVars: prefer
+	// spec.gitCredentialsSecret if set, otherwise fall back to the
+	// well-known "clotho-git-credentials" secret in the pipeline's
+	// namespace. Required to poll private repos (anonymous requests
+	// get a 404 from GitHub for private repos, indistinguishable from
+	// "ref doesn't exist").
+	secretName := pipeline.Spec.GitCredentialsSecret
+	if secretName == "" {
+		secretName = "clotho-git-credentials"
+	}
+	var secret corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: pipeline.Namespace}, &secret); err == nil {
+		if tok, ok := secret.Data["token"]; ok && len(tok) > 0 {
+			httpReq.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(tok)))
 		}
 	}
 
