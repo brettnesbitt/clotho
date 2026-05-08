@@ -285,6 +285,17 @@ type ImageBuildSpec struct {
 	// +kubebuilder:default:="1m"
 	// +optional
 	BuildBackoffBase string `json:"buildBackoffBase,omitempty"`
+
+	// PollInterval enables periodic polling of the upstream git ref. When set,
+	// the operator checks the remote SHA for spec.reference every PollInterval
+	// and clears spec.image to trigger a rebuild if the SHA has moved since the
+	// last successful build. Leave empty to disable polling (the operator will
+	// only rebuild when spec.reference or spec.image change, or the Pipeline
+	// is deleted and recreated). Examples: "5m", "15m", "1h".
+	// Currently supports GitHub via the REST API
+	// (https://api.github.com/repos/{owner}/{repo}/commits/{ref}).
+	// +optional
+	PollInterval string `json:"pollInterval,omitempty"`
 }
 
 // PipelineStatus defines the observed state of Pipeline
@@ -314,6 +325,16 @@ type PipelineStatus struct {
 	// Reset to 0 on a successful build. Used for exponential backoff.
 	// +optional
 	BuildFailures int32 `json:"buildFailures,omitempty"`
+
+	// LastBuiltSHA is the git commit SHA that spec.image was built from. Only
+	// populated when spec.build.pollInterval is set. Compared against the live
+	// upstream SHA on each poll to decide whether to rebuild.
+	// +optional
+	LastBuiltSHA string `json:"lastBuiltSHA,omitempty"`
+
+	// LastPollTime is the timestamp of the last upstream git HEAD check.
+	// +optional
+	LastPollTime *metav1.Time `json:"lastPollTime,omitempty"`
 }
 
 // +kubebuilder:object:root=true

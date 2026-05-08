@@ -613,7 +613,8 @@ func (r *PipelineReconciler) reconcileExternalBuild(ctx context.Context, pipelin
 			if deleteErr := r.Delete(ctx, existingJob, client.PropagationPolicy(metav1.DeletePropagationBackground)); deleteErr != nil && !errors.IsNotFound(deleteErr) {
 				log.Error(deleteErr, "Could not delete completed build job")
 			}
-			return ctrl.Result{}, nil
+			// Steady state: if polling is enabled, check for upstream git drift.
+			return r.checkGitDrift(ctx, pipeline)
 		}
 		if existingJob.Status.Failed > 0 {
 			// Determine retry limits from spec (defaults: max=3, base=1m)
@@ -682,6 +683,15 @@ func (r *PipelineReconciler) reconcileExternalBuild(ctx context.Context, pipelin
 	// by looking at the target-image annotation on the Pipeline CR.
 	targetImage := pipeline.Annotations["clotho.run/target-image"]
 	buildStatus := pipeline.Annotations["clotho.run/build-status"]
+
+	// Steady state: job gone, annotations present, spec.image already matches.
+	// Nothing to do unless polling is enabled and upstream git has moved.
+	// Without this branch we'd fall through and trigger a brand-new build on
+	// every reconcile after the job was TTL-cleaned.
+	if targetImage != "" && pipeline.Spec.Image == targetImage && buildStatus == "succeeded" {
+		return r.checkGitDrift(ctx, pipeline)
+	}
+
 	if targetImage != "" && pipeline.Spec.Image != targetImage {
 		if buildStatus == "succeeded" {
 			log.Info("Tier 1.5: Build job not found but target-image annotation exists, patching spec.image", "image", targetImage)
@@ -736,6 +746,215 @@ func (r *PipelineReconciler) reconcileExternalBuild(ctx context.Context, pipelin
 	pipeline.Annotations["clotho.run/builder"] = buildConfig.Builder
 
 	return ctrl.Result{RequeueAfter: time.Second * 30}, r.Update(ctx, pipeline)
+}
+
+// checkGitDrift implements the steady-state poll for upstream git changes.
+// Called from reconcileExternalBuild after a successful build has stabilized
+// (spec.image matches the target-image annotation). When spec.build.pollInterval
+// is set and has elapsed since status.lastPollTime, we fetch the current SHA
+// for spec.reference and, if it differs from status.lastBuiltSHA, clear
+// spec.image + the target-image annotation so the next reconcile triggers a
+// fresh Cloud Build.
+//
+// Returns:
+//   - {RequeueAfter: pollInterval}, nil — polling enabled, no drift detected
+//   - {Requeue: true}, nil               — drift detected, state cleared for rebuild
+//   - {}, nil                            — polling disabled, nothing to do
+func (r *PipelineReconciler) checkGitDrift(ctx context.Context, pipeline *clothov1alpha1.Pipeline) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+	buildConfig := pipeline.Spec.Build
+	if buildConfig == nil || buildConfig.PollInterval == "" {
+		// Polling disabled — preserve existing behavior (no automatic rebuilds).
+		return ctrl.Result{}, nil
+	}
+
+	pollInterval, err := time.ParseDuration(buildConfig.PollInterval)
+	if err != nil {
+		log.Error(err, "Invalid build.pollInterval, disabling poll", "value", buildConfig.PollInterval)
+		r.Recorder.Eventf(pipeline, corev1.EventTypeWarning, "InvalidPollInterval",
+			"build.pollInterval=%q is not a valid duration: %v", buildConfig.PollInterval, err)
+		return ctrl.Result{}, nil
+	}
+
+	// Rate-limit the git API call: if we polled recently, just requeue.
+	if pipeline.Status.LastPollTime != nil {
+		elapsed := time.Since(pipeline.Status.LastPollTime.Time)
+		if elapsed < pollInterval {
+			return ctrl.Result{RequeueAfter: pollInterval - elapsed}, nil
+		}
+	}
+
+	remoteSHA, err := r.resolveGitRefSHA(ctx, pipeline)
+	if err != nil {
+		// Transient network/API failures should not crash reconciliation.
+		// Log, record an event, and retry on the next poll interval.
+		log.Error(err, "Could not resolve remote git SHA, will retry on next poll", "ref", pipeline.Spec.Reference)
+		r.Recorder.Eventf(pipeline, corev1.EventTypeWarning, "GitPollFailed",
+			"Could not resolve SHA for %s@%s: %v", pipeline.Spec.GitRepository, pipeline.Spec.Reference, err)
+		// Still stamp LastPollTime so we don't tight-loop on a persistent failure.
+		now := metav1.Now()
+		pipeline.Status.LastPollTime = &now
+		if statusErr := r.Status().Update(ctx, pipeline); statusErr != nil {
+			log.Error(statusErr, "Could not update LastPollTime")
+		}
+		return ctrl.Result{RequeueAfter: pollInterval}, nil
+	}
+
+	lastSHA := pipeline.Status.LastBuiltSHA
+	now := metav1.Now()
+
+	// First-ever poll for this pipeline: record the SHA as the one we built from.
+	// We cannot retroactively determine what SHA the existing image was built
+	// against (the build is pinned to the branch name, not a SHA), so we treat
+	// the first observed SHA as the baseline. If the user pushes between now
+	// and the *next* poll, that change will be detected normally.
+	if lastSHA == "" {
+		log.Info("Recording baseline SHA for polling",
+			"ref", pipeline.Spec.Reference, "sha", remoteSHA)
+		pipeline.Status.LastBuiltSHA = remoteSHA
+		pipeline.Status.LastPollTime = &now
+		if err := r.Status().Update(ctx, pipeline); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: pollInterval}, nil
+	}
+
+	if remoteSHA == lastSHA {
+		// No drift — just bump the poll timestamp.
+		pipeline.Status.LastPollTime = &now
+		if err := r.Status().Update(ctx, pipeline); err != nil {
+			// Non-fatal — we'll try again on the next interval.
+			log.Error(err, "Could not update LastPollTime")
+		}
+		return ctrl.Result{RequeueAfter: pollInterval}, nil
+	}
+
+	// Drift detected — trigger a rebuild by clearing spec.image and the
+	// target-image annotation. Also reset BuildFailures and any BuildFailed
+	// phase so the new build gets a fresh retry budget.
+	log.Info("Upstream git ref moved, triggering rebuild",
+		"ref", pipeline.Spec.Reference, "oldSHA", lastSHA, "newSHA", remoteSHA)
+	r.Recorder.Eventf(pipeline, corev1.EventTypeNormal, "GitRefUpdated",
+		"Upstream %s moved %s → %s, rebuilding", pipeline.Spec.Reference, lastSHA[:7], remoteSHA[:7])
+
+	pipeline.Spec.Image = ""
+	if pipeline.Annotations != nil {
+		delete(pipeline.Annotations, "clotho.run/target-image")
+		delete(pipeline.Annotations, "clotho.run/build-status")
+	}
+	if err := r.Update(ctx, pipeline); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Update status separately (spec and status are different subresources).
+	// Re-fetch to avoid a resourceVersion conflict after the spec Update above.
+	var fresh clothov1alpha1.Pipeline
+	if err := r.Get(ctx, types.NamespacedName{Name: pipeline.Name, Namespace: pipeline.Namespace}, &fresh); err != nil {
+		return ctrl.Result{}, err
+	}
+	fresh.Status.LastBuiltSHA = remoteSHA
+	fresh.Status.LastPollTime = &now
+	fresh.Status.BuildFailures = 0
+	if fresh.Status.Phase == "BuildFailed" {
+		fresh.Status.Phase = "Pending"
+		fresh.Status.Message = ""
+	}
+	if err := r.Status().Update(ctx, &fresh); err != nil {
+		log.Error(err, "Could not persist rebuild status")
+	}
+
+	return ctrl.Result{Requeue: true}, nil
+}
+
+// resolveGitRefSHA fetches the commit SHA for spec.reference from the upstream
+// repo. Currently supports GitHub via the REST API. Returns an error for any
+// other host — users on GitLab/Bitbucket/etc. should leave pollInterval empty
+// until this is extended.
+//
+// Auth: if spec.gitCredentialsSecret is set, the "token" key is sent as a
+// Bearer token. Anonymous access is attempted otherwise (works for public
+// repos, rate-limited to 60 requests/hour per IP).
+func (r *PipelineReconciler) resolveGitRefSHA(ctx context.Context, pipeline *clothov1alpha1.Pipeline) (string, error) {
+	repo := pipeline.Spec.GitRepository
+	ref := pipeline.Spec.Reference
+	if repo == "" || ref == "" {
+		return "", fmt.Errorf("gitRepository and reference are required for polling")
+	}
+
+	owner, name, err := parseGitHubRepo(repo)
+	if err != nil {
+		return "", err
+	}
+
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/commits/%s", owner, name, ref)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return "", err
+	}
+	httpReq.Header.Set("Accept", "application/vnd.github+json")
+	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	// Optional token auth
+	if secretName := pipeline.Spec.GitCredentialsSecret; secretName != "" {
+		var secret corev1.Secret
+		if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: pipeline.Namespace}, &secret); err == nil {
+			if tok, ok := secret.Data["token"]; ok && len(tok) > 0 {
+				httpReq.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(tok)))
+			}
+		}
+	}
+
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	resp, err := httpClient.Do(httpReq)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		// Truncate body for log hygiene
+		snippet := string(body)
+		if len(snippet) > 200 {
+			snippet = snippet[:200]
+		}
+		return "", fmt.Errorf("github api %d: %s", resp.StatusCode, snippet)
+	}
+
+	var parsed struct {
+		SHA string `json:"sha"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", fmt.Errorf("parse github response: %w", err)
+	}
+	if parsed.SHA == "" {
+		return "", fmt.Errorf("github response missing sha")
+	}
+	return parsed.SHA, nil
+}
+
+// parseGitHubRepo extracts owner and repo name from a GitHub URL.
+// Supports: https://github.com/owner/repo[.git], git@github.com:owner/repo[.git].
+func parseGitHubRepo(url string) (owner, name string, err error) {
+	s := strings.TrimSpace(url)
+	s = strings.TrimSuffix(s, ".git")
+
+	switch {
+	case strings.HasPrefix(s, "https://github.com/"):
+		s = strings.TrimPrefix(s, "https://github.com/")
+	case strings.HasPrefix(s, "http://github.com/"):
+		s = strings.TrimPrefix(s, "http://github.com/")
+	case strings.HasPrefix(s, "git@github.com:"):
+		s = strings.TrimPrefix(s, "git@github.com:")
+	default:
+		return "", "", fmt.Errorf("polling currently supports only GitHub repos, got %q", url)
+	}
+
+	parts := strings.SplitN(s, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", fmt.Errorf("could not parse owner/repo from %q", url)
+	}
+	return parts[0], parts[1], nil
 }
 
 // triggerCloudBuild triggers a Cloud Build job via the GCP API
