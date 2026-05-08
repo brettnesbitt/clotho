@@ -423,6 +423,18 @@ func (r *PipelineReconciler) reconcileBuild(ctx context.Context, pipeline *cloth
 		return r.reconcileExternalBuild(ctx, pipeline)
 	}
 
+	// External build steady state: image is set, no in-flight build.
+	// If the user opted into upstream git polling, check whether the
+	// remote ref has moved and (if so) clear spec.image to trigger a
+	// fresh build. This branch is opt-in via spec.build.pollInterval
+	// — pipelines without polling fall through to the existing Tier-1
+	// fallthrough behavior unchanged.
+	if pipeline.Spec.Build != nil && pipeline.Spec.Build.PollInterval != "" {
+		if res, err := r.checkGitDrift(ctx, pipeline); err != nil || res.Requeue || res.RequeueAfter > 0 {
+			return res, err
+		}
+	}
+
 	// -----------------------------------------------------------
 	// Tier 1: Batteries Included (Internal Registry)
 	// Builder compiles from Git and pushes to the in-cluster registry.
