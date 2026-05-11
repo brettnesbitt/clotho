@@ -134,11 +134,23 @@ impl Sink<Vec<Value>> for ParquetSink {
             writer.close().context("Failed to close Parquet writer")?;
         }
 
-        // 4. Generate unique object name using current time / UUID
-        // Use Utc::now() from chrono
-        let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+        let now = chrono::Utc::now();
+        let timestamp = now.format("%Y%m%d_%H%M%S");
+        let year = now.format("%Y");
+        let month = now.format("%m");
+        let day = now.format("%d");
+        let hour = now.format("%H");
         let unique_id = uuid::Uuid::new_v4().to_string();
-        let object_name = format!("{}/{}_{}.parquet", self.object_prefix, timestamp, &unique_id[..8]);
+        
+        let mut prefix = self.object_prefix.clone();
+        if prefix.ends_with('/') {
+            prefix.pop();
+        }
+        
+        let object_name = format!(
+            "{}/year={}/month={}/day={}/hour={}/{}_{}.parquet",
+            prefix, year, month, day, hour, timestamp, &unique_id[..8]
+        );
 
         // 5. Upload to GCS
         self.upload_to_gcs(&object_name, parquet_buffer).await?;
