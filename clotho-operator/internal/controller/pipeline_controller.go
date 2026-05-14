@@ -49,6 +49,7 @@ type PipelineReconciler struct {
 // +kubebuilder:rbac:groups=core.spinkube.dev,resources=spinapps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
@@ -98,8 +99,18 @@ func (r *PipelineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		// Single-stage pipeline (legacy behavior)
 		switch pipeline.Spec.Runtime {
 		case clothov1alpha1.PipelineRuntimeNative:
-			if err := r.reconcileNativeDeployment(ctx, &pipeline); err != nil {
-				return ctrl.Result{}, err
+			// `mode: once` + `schedule.mode: cron` is a one-shot batch job
+			// that k8s should schedule via CronJob. A Deployment would auto-
+			// restart the pod after every successful exit (CrashLoopBackOff
+			// even when the run succeeded). Route to CronJob in that case.
+			if isNativeCronJobPipeline(&pipeline) {
+				if err := r.reconcileNativeCronJob(ctx, &pipeline); err != nil {
+					return ctrl.Result{}, err
+				}
+			} else {
+				if err := r.reconcileNativeDeployment(ctx, &pipeline); err != nil {
+					return ctrl.Result{}, err
+				}
 			}
 		default: // wasm (default)
 			if err := r.reconcileSpinApp(ctx, &pipeline); err != nil {
@@ -275,9 +286,35 @@ func (r *PipelineReconciler) reconcileSpinApp(ctx context.Context, pipeline *clo
 	})
 }
 
+// isNativeCronJobPipeline returns true when this Pipeline should be materialized
+// as a Kubernetes CronJob rather than a Deployment. Applies to native pipelines
+// where each cron tick is a single-shot run (mode: once|batch) — a Deployment
+// would loop-restart the pod after a clean exit.
+func isNativeCronJobPipeline(p *clothov1alpha1.Pipeline) bool {
+	if p.Spec.Runtime != clothov1alpha1.PipelineRuntimeNative {
+		return false
+	}
+	if p.Spec.Mode != clothov1alpha1.PipelineModeOnce && p.Spec.Mode != clothov1alpha1.PipelineModeBatch {
+		return false
+	}
+	if p.Spec.Schedule == nil {
+		return false
+	}
+	return p.Spec.Schedule.Mode == "cron" && p.Spec.Schedule.Cron != ""
+}
+
 // reconcileNativeDeployment handles native pipelines by creating/updating a Deployment
 func (r *PipelineReconciler) reconcileNativeDeployment(ctx context.Context, pipeline *clothov1alpha1.Pipeline) error {
 	log := log.FromContext(ctx)
+
+	// If this pipeline used to be a CronJob (e.g. user changed schedule), garbage
+	// collect the CronJob so we don't have two workloads side by side.
+	orphan := &batchv1.CronJob{}
+	if err := r.Get(ctx, types.NamespacedName{Name: pipeline.Name, Namespace: pipeline.Namespace}, orphan); err == nil {
+		if err := r.Delete(ctx, orphan); err != nil && !errors.IsNotFound(err) {
+			log.Error(err, "Failed to delete orphaned CronJob", "name", orphan.Name)
+		}
+	}
 
 	deploy := r.constructDeployment(pipeline)
 	if err := ctrl.SetControllerReference(pipeline, deploy, r.Scheme); err != nil {
@@ -297,6 +334,116 @@ func (r *PipelineReconciler) reconcileNativeDeployment(ctx context.Context, pipe
 	found.Spec.Replicas = deploy.Spec.Replicas
 	found.Spec.Template = deploy.Spec.Template
 	return r.Update(ctx, found)
+}
+
+// reconcileNativeCronJob handles native one-shot pipelines with a cron schedule
+// by creating/updating a CronJob. Each tick spawns a Job that runs the container
+// to completion and exits — avoiding the Deployment-restart-loop problem for
+// binaries whose main() returns after one execution.
+func (r *PipelineReconciler) reconcileNativeCronJob(ctx context.Context, pipeline *clothov1alpha1.Pipeline) error {
+	log := log.FromContext(ctx)
+
+	// Garbage-collect any pre-existing Deployment from when this pipeline was
+	// (mis)deployed as a long-running native workload.
+	orphan := &appsv1.Deployment{}
+	if err := r.Get(ctx, types.NamespacedName{Name: pipeline.Name, Namespace: pipeline.Namespace}, orphan); err == nil {
+		if err := r.Delete(ctx, orphan); err != nil && !errors.IsNotFound(err) {
+			log.Error(err, "Failed to delete orphaned Deployment", "name", orphan.Name)
+		}
+	}
+
+	cj := r.constructCronJob(pipeline)
+	if err := ctrl.SetControllerReference(pipeline, cj, r.Scheme); err != nil {
+		return err
+	}
+
+	found := &batchv1.CronJob{}
+	err := r.Get(ctx, types.NamespacedName{Name: cj.Name, Namespace: cj.Namespace}, found)
+	if err != nil && errors.IsNotFound(err) {
+		log.Info("Creating native CronJob", "Namespace", cj.Namespace, "Name", cj.Name, "Schedule", cj.Spec.Schedule)
+		return r.Create(ctx, cj)
+	} else if err != nil {
+		return err
+	}
+
+	found.Spec.Schedule = cj.Spec.Schedule
+	found.Spec.JobTemplate = cj.Spec.JobTemplate
+	found.Spec.ConcurrencyPolicy = cj.Spec.ConcurrencyPolicy
+	found.Spec.SuccessfulJobsHistoryLimit = cj.Spec.SuccessfulJobsHistoryLimit
+	found.Spec.FailedJobsHistoryLimit = cj.Spec.FailedJobsHistoryLimit
+	return r.Update(ctx, found)
+}
+
+// constructCronJob maps Clotho Pipeline -> Kubernetes CronJob (native runtime,
+// once/batch mode, cron schedule). Container spec mirrors constructDeployment.
+func (r *PipelineReconciler) constructCronJob(p *clothov1alpha1.Pipeline) *batchv1.CronJob {
+	labels := map[string]string{
+		"app":                 p.Name,
+		"clotho.run/pipeline": p.Name,
+		"clotho.run/mode":     string(p.Spec.Mode),
+		"clotho.run/runtime":  "native",
+		"managed-by":          "clotho",
+	}
+
+	envVars := []corev1.EnvVar{
+		{Name: "CLOTHO_PIPELINE_ID", Value: p.Name},
+		{Name: "CLOTHO_API_URL", Value: r.ControlPlaneURL},
+		{Name: "RUST_LOG", Value: "info"},
+		{
+			Name: "CLOTHO_AGENT_HOST",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.hostIP"},
+			},
+		},
+	}
+	for _, cfg := range p.Spec.Config {
+		ev := corev1.EnvVar{Name: cfg.Name}
+		if cfg.Value != "" {
+			ev.Value = cfg.Value
+		}
+		if cfg.ValueFrom != nil && cfg.ValueFrom.SecretKeyRef != nil {
+			ev.ValueFrom = &corev1.EnvVarSource{SecretKeyRef: cfg.ValueFrom.SecretKeyRef}
+		}
+		envVars = append(envVars, ev)
+	}
+
+	successHistory := int32(3)
+	failedHistory := int32(3)
+
+	jobSpec := batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{Labels: labels},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name:            "pipeline",
+					Image:           p.Spec.Image,
+					ImagePullPolicy: corev1.PullAlways,
+					Env:             envVars,
+					Resources:       p.Spec.Resources,
+				}},
+				ImagePullSecrets: p.Spec.ImagePullSecrets,
+				RestartPolicy:    corev1.RestartPolicyOnFailure,
+			},
+		},
+	}
+
+	return &batchv1.CronJob{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      p.Name,
+			Namespace: p.Namespace,
+			Labels:    labels,
+		},
+		Spec: batchv1.CronJobSpec{
+			Schedule:                   p.Spec.Schedule.Cron,
+			ConcurrencyPolicy:          batchv1.ForbidConcurrent,
+			SuccessfulJobsHistoryLimit: &successHistory,
+			FailedJobsHistoryLimit:     &failedHistory,
+			JobTemplate: batchv1.JobTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				Spec:       jobSpec,
+			},
+		},
+	}
 }
 
 // constructDeployment maps Clotho Pipeline -> Kubernetes Deployment (native runtime)
@@ -377,7 +524,8 @@ func (r *PipelineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&clothov1alpha1.Pipeline{}).
 		Owns(&spinva1.SpinApp{}).
 		Owns(&appsv1.Deployment{}).
-		Owns(&batchv1.Job{}). // Watch builder jobs to detect completion
+		Owns(&batchv1.Job{}).     // Watch builder jobs to detect completion
+		Owns(&batchv1.CronJob{}). // Watch CronJobs created for native once+cron pipelines
 		Complete(r)
 }
 
@@ -1231,6 +1379,14 @@ func (r *PipelineReconciler) reconcileSchedule(ctx context.Context, pipeline *cl
 
 	// No schedule configured = trigger mode (on-demand only)
 	if pipeline.Spec.Schedule == nil || pipeline.Spec.Schedule.Mode == "trigger" {
+		return ctrl.Result{}, nil
+	}
+
+	// Native pipelines materialized as k8s CronJobs schedule themselves at the
+	// kubelet level. We must NOT also HTTP-POST to a Service (none exists) on
+	// every cron tick — that would double-fire and log spurious connection
+	// errors. The CronJob owns the schedule lifecycle in this case.
+	if isNativeCronJobPipeline(pipeline) {
 		return ctrl.Result{}, nil
 	}
 
