@@ -3,6 +3,8 @@
 # Rust
 target
 bin
+*-bin
+.clotho-api/clotho-api-bin
 build
 dist
 node_modules

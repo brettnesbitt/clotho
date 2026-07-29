@@ -1172,7 +1172,7 @@ func (r *PipelineReconciler) triggerCloudBuild(ctx context.Context, pipeline *cl
 					RestartPolicy: corev1.RestartPolicyNever,
 					Containers: []corev1.Container{{
 						Name:  "cloudbuild-trigger",
-						Image: "gcr.io/cloud-builders/gcloud:latest",
+						Image: "us-central1-docker.pkg.dev/quotopia-391900/clotho/gcloud-arm64:latest",
 						Command: []string{"sh", "-c", fmt.Sprintf(`
 							set -e
 							if [ -f /etc/cloudbuild/key.json ]; then
@@ -1190,13 +1190,18 @@ func (r *PipelineReconciler) triggerCloudBuild(ctx context.Context, pipeline *cl
 							if [ -f Cargo.toml ] && grep -q "clotho" Cargo.toml; then
 								git clone --depth 1 --branch main "https://${GIT_TOKEN}@github.com/brettnesbitt/clotho.git" vendor-clotho
 								sed -i "s|\.\./\.\./\.\./clotho|vendor-clotho|g" Cargo.toml
+								rm -rf vendor-clotho/.git
 							fi
 							gcloud builds submit . \
+								--project=quotopia-391900 \
 								--config=cloudbuild.yaml \
 								--polling-interval=30 \
 								--substitutions=_TARGET_IMAGE=%s
 						`, pipeline.Spec.GitRepository, pipeline.Spec.Reference, pipeline.Spec.Path, targetImage)},
 						Env: []corev1.EnvVar{{
+							Name:  "CLOUDSDK_CORE_PROJECT",
+							Value: "quotopia-391900",
+						}, {
 							Name: "GIT_TOKEN",
 							ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
 								LocalObjectReference: corev1.LocalObjectReference{Name: "clotho-git-credentials"},

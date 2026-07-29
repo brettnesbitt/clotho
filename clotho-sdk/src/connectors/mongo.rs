@@ -187,6 +187,22 @@ impl MongoSource {
         Ok(results)
     }
 
+    pub async fn aggregate_raw(&self, pipeline: serde_json::Value) -> Result<Vec<serde_json::Value>> {
+        use futures_util::StreamExt;
+        let bson_val = bson::to_bson(&pipeline)?;
+        let pipeline_docs: Vec<Document> = match bson_val {
+            bson::Bson::Array(arr) => arr.into_iter().filter_map(|b| b.as_document().cloned()).collect(),
+            _ => vec![],
+        };
+        let mut cursor = self.collection.aggregate(pipeline_docs, None).await?;
+        let mut results = Vec::new();
+        while let Some(doc) = cursor.next().await {
+            let doc = doc?;
+            results.push(serde_json::to_value(&doc)?);
+        }
+        Ok(results)
+    }
+
     pub async fn watch(mut self) -> Result<Self> {
         // You can pass self.pipeline here if you want to filter the CDC events natively!
         let stream = self.collection.watch(self.pipeline.clone(), None).await?;

@@ -57,6 +57,8 @@ spec:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
+      imagePullSecrets:
+        - name: gcr-credentials
       containers:
       - command:
         - /manager

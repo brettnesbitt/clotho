@@ -76,9 +76,11 @@ spec:
         app: clotho-api
     spec:
       serviceAccountName: clotho-api
+      imagePullSecrets:
+        - name: gcr-credentials
       containers:
         - name: api
-          image: ghcr.io/clotho-framework/clotho-api:latest
+          image: us-central1-docker.pkg.dev/quotopia-391900/clotho/clotho-api:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 3000

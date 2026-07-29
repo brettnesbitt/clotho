@@ -18,6 +18,8 @@ spec:
         app.kubernetes.io/component: data-plane
         app.kubernetes.io/part-of: clotho
     spec:
+      imagePullSecrets:
+        - name: gcr-credentials
       containers:
         - name: proxy
           image: us-central1-docker.pkg.dev/quotopia-391900/clotho/clotho-data-proxy:latest
@@ -29,6 +31,8 @@ spec:
               value: "9090"
             - name: RUST_LOG
               value: "clotho_data_proxy=info"
+            - name: MONGO_URI
+              value: "mongodb://brettnesbitt:Chanute1@stockseer-mongo-svc.mongodb.svc.cluster.local:27017/?authSource=admin"
           resources:
             requests:
               cpu: "50m"
