@@ -22,7 +22,7 @@ spec:
         - name: gcr-credentials
       containers:
         - name: proxy
-          image: us-central1-docker.pkg.dev/quotopia-391900/clotho/clotho-data-proxy:latest
+          image: us-central1-docker.pkg.dev/quotopia-391900/clotho/clotho-data-proxy:redact-20260926
           ports:
             - containerPort: 9090
               name: http
@@ -31,8 +31,24 @@ spec:
               value: "9090"
             - name: RUST_LOG
               value: "clotho_data_proxy=info"
+            # From a Secret, never a literal: this value used to be the full
+            # connection string with the password inline, committed here and
+            # visible to anyone who could read the DaemonSet.
+            #
+            # The URI lists all three members plus replicaSet=stockseer-mongo.
+            # It used to name only the headless service, which resolves to every
+            # mongod pod including any that is NOT in the replica set. A proxy
+            # whose first connection landed on such a pod could never discover
+            # the primary and crash-looped (1,544 restarts on pi-node-3, Sep
+            # 2026), so whether a restarted proxy worked was down to DNS order.
+            # With replicaSet set, the driver ignores non-members.
+            #   kubectl -n clotho-system create secret generic clotho-mongo-credentials \
+            #     --from-literal=uri='mongodb://USER:PASS@stockseer-mongo-0.stockseer-mongo-svc.mongodb.svc.cluster.local:27017,stockseer-mongo-1.stockseer-mongo-svc.mongodb.svc.cluster.local:27017,stockseer-mongo-2.stockseer-mongo-svc.mongodb.svc.cluster.local:27017/?authSource=admin&replicaSet=stockseer-mongo'
             - name: MONGO_URI
-              value: "mongodb://brettnesbitt:Chanute1@stockseer-mongo-svc.mongodb.svc.cluster.local:27017/?authSource=admin"
+              valueFrom:
+                secretKeyRef:
+                  name: clotho-mongo-credentials
+                  key: uri
           resources:
             requests:
               cpu: "50m"

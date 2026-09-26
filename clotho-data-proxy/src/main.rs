@@ -891,7 +891,9 @@ async fn main() {
     let port = std::env::var("PORT").unwrap_or_else(|_| "9090".into());
     let addr = format!("0.0.0.0:{}", port);
 
-    info!(mongo_uri = %mongo_uri, database = %database, "Connecting to MongoDB");
+    // Never log the URI itself: it carries the password. This line printed it
+    // at INFO on every start, and a crash-looping pod started 1,544 times.
+    info!(mongo_uri = %redact_uri(&mongo_uri), database = %database, "Connecting to MongoDB");
     let mut opts = mongodb::options::ClientOptions::parse(&mongo_uri)
         .await
         .expect("Failed to parse MongoDB URI");
@@ -938,4 +940,36 @@ async fn main() {
 
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+/// `scheme://user:SECRET@hosts/...` -> `scheme://user:***@hosts/...`.
+/// A URI without credentials is returned unchanged.
+fn redact_uri(uri: &str) -> String {
+    let Some(scheme_end) = uri.find("://") else { return uri.to_string() };
+    let rest = &uri[scheme_end + 3..];
+    // Credentials end at the LAST '@' before the host list; passwords may contain '@'
+    // only percent-encoded, but be defensive and split on the last one anyway.
+    let host_start = rest.find('/').unwrap_or(rest.len());
+    let Some(at) = rest[..host_start].rfind('@') else { return uri.to_string() };
+    let creds = &rest[..at];
+    let user = creds.split(':').next().unwrap_or("");
+    format!("{}://{}:***@{}", &uri[..scheme_end], user, &rest[at + 1..])
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::redact_uri;
+
+    #[test]
+    fn hides_the_password_and_keeps_everything_else() {
+        let r = redact_uri("mongodb://bob:hunter2@a:27017,b:27017/?authSource=admin&replicaSet=rs");
+        assert_eq!(r, "mongodb://bob:***@a:27017,b:27017/?authSource=admin&replicaSet=rs");
+        assert!(!r.contains("hunter2"));
+    }
+
+    #[test]
+    fn leaves_credential_free_uris_alone() {
+        assert_eq!(redact_uri("mongodb://a:27017/?x=1"), "mongodb://a:27017/?x=1");
+        assert_eq!(redact_uri("not a uri"), "not a uri");
+    }
 }

@@ -1,0 +1,10 @@
+# Fast arm64 image: the binary is cross-compiled natively on the host with
+# cargo-zigbuild (see build-arm64.sh) and only copied in here, so no Rust
+# compilation happens under QEMU emulation. Runtime stage matches Dockerfile.
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY dist/clotho-data-proxy /usr/local/bin/clotho-data-proxy
+EXPOSE 9090
+ENV PORT=9090
+ENV RUST_LOG=clotho_data_proxy=info
+ENTRYPOINT ["clotho-data-proxy"]
